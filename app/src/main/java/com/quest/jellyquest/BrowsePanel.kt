@@ -7,13 +7,23 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyGridState
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.layout.ContentScale
+import coil.compose.AsyncImage
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Text
@@ -32,6 +42,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.meta.spatial.uiset.button.PrimaryButton
 import com.meta.spatial.uiset.button.SecondaryButton
 import com.meta.spatial.uiset.theme.LocalColorScheme
@@ -265,6 +276,9 @@ private fun LibraryBrowser(
     var currentItems by remember { mutableStateOf<List<JellyfinItem>?>(null) }
     var breadcrumb by remember { mutableStateOf<List<Pair<String, UUID?>>>(emptyList()) }
     var isLoading by remember { mutableStateOf(false) }
+    var genreFilter by remember { mutableStateOf<String?>(null) }
+    var sortMode by remember { mutableStateOf(SortMode.NAME) }
+    val gridState = rememberLazyGridState()
 
     // Use pre-fetched data if available, otherwise fetch on demand
     LaunchedEffect(Unit) {
@@ -331,7 +345,7 @@ private fun LibraryBrowser(
         )
     }
 
-    Spacer(modifier = Modifier.size(16.dp))
+    Spacer(modifier = Modifier.size(10.dp))
 
     if (isLoading) {
         Text(
@@ -340,125 +354,253 @@ private fun LibraryBrowser(
                 color = SpatialTheme.colorScheme.secondaryAlphaBackground,
             ),
         )
-    } else {
-        val items = currentItems ?: emptyList()
-        if (items.isEmpty()) {
-            Text(
-                text = "No items found",
-                style = SpatialTheme.typography.body1.copy(
-                    color = SpatialTheme.colorScheme.secondaryAlphaBackground,
-                ),
-            )
-        } else {
-            LazyColumn(modifier = Modifier.fillMaxSize()) {
-                items(items) { item ->
-                    BrowseListItem(
-                        item = item,
-                        onClick = {
-                            if (item.isFolder) {
-                                val cachedChildren = jellyfinClient.cachedItems.value[item.id]
-                                if (cachedChildren != null) {
-                                    currentItems = cachedChildren
-                                    breadcrumb = breadcrumb + (item.name to item.id)
-                                } else {
-                                    isLoading = true
-                                    scope.launch {
-                                        val children = jellyfinClient.getItems(item.id)
-                                        currentItems = children
-                                        breadcrumb = breadcrumb + (item.name to item.id)
-                                        isLoading = false
-                                    }
-                                }
-                            } else {
-                                onMediaSelected(item)
-                            }
-                        },
-                    )
+        return
+    }
+
+    val items = currentItems ?: emptyList()
+    if (items.isEmpty()) {
+        Text(
+            text = "No items found",
+            style = SpatialTheme.typography.body1.copy(
+                color = SpatialTheme.colorScheme.secondaryAlphaBackground,
+            ),
+        )
+        return
+    }
+
+    val openItem: (JellyfinItem) -> Unit = { item ->
+        if (item.isFolder) {
+            genreFilter = null
+            val cachedChildren = jellyfinClient.cachedItems.value[item.id]
+            if (cachedChildren != null) {
+                currentItems = cachedChildren
+                breadcrumb = breadcrumb + (item.name to item.id)
+            } else {
+                isLoading = true
+                scope.launch {
+                    val children = jellyfinClient.getItems(item.id)
+                    currentItems = children
+                    breadcrumb = breadcrumb + (item.name to item.id)
+                    isLoading = false
                 }
+            }
+        } else {
+            onMediaSelected(item)
+        }
+    }
+
+    // Sort chips, Jellyfin-style.
+    LazyRow(
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        items(SortMode.entries, key = { it.name }) { mode ->
+            val selected = sortMode == mode
+            Text(
+                text = mode.label,
+                style = SpatialTheme.typography.body2.copy(
+                    color = if (selected) Color.Black else DraculaForeground,
+                ),
+                modifier = Modifier
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(if (selected) DraculaCyan else DraculaCurrentLine)
+                    .clickable { sortMode = mode }
+                    .padding(horizontal = 12.dp, vertical = 5.dp),
+            )
+        }
+    }
+    Spacer(modifier = Modifier.size(8.dp))
+
+    // Genre filter chips — built from the genres present in the current list.
+    val genres = remember(items) {
+        items.flatMap { it.genres }.distinct().sorted()
+    }
+    if (genres.isNotEmpty()) {
+        LazyRow(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            items(listOf<String?>(null) + genres, key = { it ?: "__all__" }) { genre ->
+                val selected = genreFilter == genre
+                Text(
+                    text = genre ?: "All",
+                    style = SpatialTheme.typography.body2.copy(
+                        color = if (selected) Color.Black else DraculaForeground,
+                    ),
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(if (selected) DraculaPurple else DraculaCurrentLine)
+                        .clickable { genreFilter = genre }
+                        .padding(horizontal = 12.dp, vertical = 5.dp),
+                )
+            }
+        }
+        Spacer(modifier = Modifier.size(10.dp))
+    }
+
+    val displayed = remember(items, genreFilter, sortMode) {
+        val filter = genreFilter
+        val filtered = if (filter == null) items else items.filter { filter in it.genres }
+        when (sortMode) {
+            SortMode.NAME -> filtered.sortedBy { it.sortKey.lowercase() }
+            SortMode.DATE_ADDED -> filtered.sortedByDescending { it.dateCreatedMs }
+            SortMode.RATING -> filtered.sortedByDescending { it.communityRating }
+            // Unwatched first, A–Z within each group (sortedBy is stable).
+            SortMode.UNWATCHED -> filtered.sortedBy { it.sortKey.lowercase() }.sortedBy { it.played }
+        }
+    }
+
+    // Poster grid with a single A–Z jump strip on the right, Jellyfin-style.
+    // The strip only makes sense in A–Z order, so it hides for other sorts.
+    Row(modifier = Modifier.fillMaxSize()) {
+        LazyVerticalGrid(
+            columns = GridCells.Adaptive(minSize = 140.dp),
+            state = gridState,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier
+                .weight(1f)
+                .padding(horizontal = 6.dp),
+        ) {
+            items(displayed, key = { it.id }) { item ->
+                PosterCard(
+                    item = item,
+                    imageUrl = jellyfinClient.getImageUrl(item.id),
+                    onClick = { openItem(item) },
+                )
+            }
+        }
+        if (sortMode == SortMode.NAME) {
+            AlphabetStrip { letter -> scope.launch { gridState.scrollToLetter(displayed, letter) } }
+        }
+    }
+}
+
+private enum class SortMode(val label: String) {
+    NAME("A–Z"),
+    DATE_ADDED("Recently Added"),
+    RATING("Top Rated"),
+    UNWATCHED("Unwatched"),
+}
+
+/** Snap the grid to the first item at or after [letter] ('#' = non-alphabetic). */
+private suspend fun LazyGridState.scrollToLetter(items: List<JellyfinItem>, letter: Char) {
+    val index = items.indexOfFirst { item ->
+        val c = item.sortKey.firstOrNull()?.uppercaseChar()
+        when {
+            c == null -> false
+            letter == '#' -> !c.isLetter()
+            else -> c.isLetter() && c >= letter
+        }
+    }
+    if (index >= 0) {
+        // Instant snap — animated scrolling across hundreds of grid rows
+        // renders as seconds of janky fast-scroll in a VR panel.
+        scrollToItem(index)
+    }
+}
+
+@Composable
+private fun AlphabetStrip(onLetter: (Char) -> Unit) {
+    // Each letter takes an equal share of the strip's full height, so all 27
+    // always fit regardless of panel size — no clipping past Q, and the tap
+    // target is the whole slot, not just the glyph.
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier
+            .fillMaxHeight()
+            .padding(start = 2.dp),
+    ) {
+        "#ABCDEFGHIJKLMNOPQRSTUVWXYZ".forEach { c ->
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .weight(1f)
+                    .clickable { onLetter(c) }
+                    .padding(horizontal = 8.dp),
+            ) {
+                Text(
+                    text = c.toString(),
+                    style = SpatialTheme.typography.body2.copy(
+                        color = DraculaCyan,
+                        fontSize = 13.sp,
+                        lineHeight = 13.sp,
+                    ),
+                    softWrap = false,
+                )
             }
         }
     }
 }
 
 @Composable
-private fun BrowseListItem(
+private fun PosterCard(
     item: JellyfinItem,
+    imageUrl: String?,
     onClick: () -> Unit,
 ) {
-    val hasPosition = !item.isFolder && item.playbackPositionTicks > 0
-    val hasProgress = hasPosition && item.runTimeTicks > 0
+    val hasProgress = !item.isFolder && item.playbackPositionTicks > 0 && item.runTimeTicks > 0
     val fullyWatched = hasProgress && PlaybackReporter.isFullyWatched(
         item.playbackPositionTicks, item.runTimeTicks,
     )
-    val progressPercent = if (hasProgress) {
+    val progressPercent = if (hasProgress && !fullyWatched) {
         PlaybackReporter.computeProgressPercent(item.playbackPositionTicks, item.runTimeTicks)
     } else 0
-    val remainingMin = if (hasProgress && !fullyWatched) {
-        PlaybackReporter.computeRemainingMinutes(item.playbackPositionTicks, item.runTimeTicks)
-    } else 0
 
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick),
-    ) {
-        Row(
+    Column(modifier = Modifier.clickable(onClick = onClick)) {
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(vertical = 12.dp, horizontal = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
+                .aspectRatio(2f / 3f)
+                .clip(RoundedCornerShape(8.dp))
+                .background(DraculaCurrentLine),
         ) {
-            Text(
-                text = if (item.isFolder) "[+]" else "   ",
-                style = SpatialTheme.typography.body1.copy(
-                    color = if (item.isFolder) DraculaYellow else DraculaGreen,
-                ),
-            )
-            Spacer(modifier = Modifier.size(12.dp))
-            Text(
-                text = item.name,
-                style = SpatialTheme.typography.body1.copy(
-                    color = SpatialTheme.colorScheme.primaryAlphaBackground,
-                ),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
+            AsyncImage(
+                model = imageUrl,
+                contentDescription = item.name,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
             )
             if (fullyWatched) {
-                Spacer(modifier = Modifier.size(8.dp))
                 Text(
-                    text = "Watched",
-                    style = SpatialTheme.typography.body2.copy(color = DraculaGreen),
-                )
-            } else if (hasProgress && remainingMin > 0) {
-                Spacer(modifier = Modifier.size(8.dp))
-                Text(
-                    text = "${remainingMin} min left",
-                    style = SpatialTheme.typography.body2.copy(color = DraculaOrange),
-                )
-            } else if (hasPosition && !hasProgress) {
-                Spacer(modifier = Modifier.size(8.dp))
-                Text(
-                    text = "In Progress",
-                    style = SpatialTheme.typography.body2.copy(color = DraculaOrange),
+                    text = "✓",
+                    style = SpatialTheme.typography.body2.copy(color = Color.Black),
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(6.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(DraculaGreen)
+                        .padding(horizontal = 6.dp, vertical = 1.dp),
                 )
             }
-        }
-        if (hasProgress && !fullyWatched && progressPercent > 0) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 8.dp)
-                    .background(DraculaCurrentLine)
-                    .height(2.dp),
-            ) {
+            if (progressPercent > 0) {
                 Box(
                     modifier = Modifier
-                        .fillMaxWidth(progressPercent / 100f)
-                        .background(DraculaPurple)
-                        .height(2.dp),
-                )
+                        .align(Alignment.BottomStart)
+                        .fillMaxWidth()
+                        .height(4.dp)
+                        .background(Color.Black.copy(alpha = 0.5f)),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(progressPercent / 100f)
+                            .height(4.dp)
+                            .background(DraculaPurple),
+                    )
+                }
             }
         }
+        Text(
+            text = item.name,
+            style = SpatialTheme.typography.body2.copy(
+                color = SpatialTheme.colorScheme.primaryAlphaBackground,
+            ),
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.Center,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 4.dp),
+        )
     }
 }

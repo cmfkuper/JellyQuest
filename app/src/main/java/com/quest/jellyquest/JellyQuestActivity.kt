@@ -35,11 +35,15 @@ import com.meta.spatial.toolkit.MediaPanelRenderOptions
 import com.meta.spatial.toolkit.MediaPanelSettings
 import com.meta.spatial.toolkit.Mesh
 import com.meta.spatial.toolkit.MeshCollision
+import com.meta.spatial.runtime.PanelConfigOptions
 import com.meta.spatial.toolkit.PanelInputOptions
+import com.meta.spatial.toolkit.PanelSettings
 import com.meta.spatial.toolkit.PanelRegistration
 import com.meta.spatial.toolkit.PanelStyleOptions
 import com.meta.spatial.toolkit.PixelDisplayOptions
 import com.meta.spatial.toolkit.QuadShapeOptions
+import com.meta.spatial.core.Hand
+import com.meta.spatial.core.Quaternion
 import com.meta.spatial.toolkit.Box
 import com.meta.spatial.toolkit.Transform
 import com.meta.spatial.toolkit.UIPanelSettings
@@ -83,8 +87,17 @@ class JellyQuestActivity : AppSystemActivity() {
   val theaterState = mutableStateOf(TheaterState())
 
   private var screenEntity: Entity? = null
+  private var subtitleEntity: Entity? = null
   private var browsePanelEntity: Entity? = null
   val browsePanelVisible = mutableStateOf(false)
+  var browseHandleEntity: Entity? = null
+    private set
+
+  // Where the user last dragged the browse panel; overrides the default spawn
+  // pose until a recenter invalidates world coordinates.
+  private var customBrowsePose: Pose? = null
+  private var controlsPanelEntity: Entity? = null
+  val controlsPanelVisible = mutableStateOf(false)
   private var skyboxEntity: Entity? = null
   private var floorEntity: Entity? = null
   private var wallEntities: List<Entity> = emptyList()
@@ -111,6 +124,20 @@ class JellyQuestActivity : AppSystemActivity() {
   // Anchor: immutable snapshot of the user's position and facing direction.
   // Captured at startup and on recenter. All placement is relative to this point.
   private var anchor: Anchor? = null
+
+  // Ambient screen lighting ("bias lighting"): room surfaces and their base
+  // colors, re-tinted in real time from the video's sampled average color.
+  // Gain sets how strongly a surface reacts — fixtures glow (>2), surfaces
+  // near the screen catch more light than the back of the house.
+  private data class TintSurface(val entity: Entity, val base: Color4, val gain: Float)
+  private val tintableEntities = mutableListOf<TintSurface>()
+  private var ambientR = 0.5f
+  private var ambientG = 0.5f
+  private var ambientB = 0.5f
+  private var appliedR = -1f
+  private var appliedG = -1f
+  private var appliedB = -1f
+  private var lastTintApplyMs = 0L
 
   override fun registerFeatures(): List<SpatialFeature> {
     val features =
@@ -147,6 +174,11 @@ class JellyQuestActivity : AppSystemActivity() {
     // Wire spatial audio and room acoustics to ExoPlayer's audio session
     exoPlayerSource.onPlayerReady = { wireSpatialAudio() }
 
+    // Ambient lighting: sampled screen color arrives on the GL thread.
+    exoPlayerSource.onScreenColor = { r, g, b ->
+      runOnUiThread { applyAmbientColor(r, g, b) }
+    }
+
     // Reshape screen panel when video dimensions change (aspect-ratio masking)
     activityScope.launch {
       exoPlayerSource.mediaInfo.collect { info ->
@@ -165,6 +197,7 @@ class JellyQuestActivity : AppSystemActivity() {
     if (jellyfinClient.authState.value == AuthState.AUTHENTICATED) {
       activityScope.launch { jellyfinClient.prefetchLibraryContent() }
     }
+
   }
 
   override fun onPause() {
@@ -215,8 +248,11 @@ class JellyQuestActivity : AppSystemActivity() {
       }
     }
 
+    systemManager.registerSystem(PanelDragSystem(this))
+
     systemManager.registerSystem(
         ControllerInputSystem(
+            isBrowseVisible = { browsePanelVisible.value },
             onBrowseToggle = {
               Log.i(TAG, "onBrowseToggle: visible=${browsePanelVisible.value}")
               if (!browsePanelVisible.value) {
@@ -226,25 +262,11 @@ class JellyQuestActivity : AppSystemActivity() {
                 dismissBrowsePanel()
               }
             },
-            onPlayPauseToggle = {
-              exoPlayerSource.togglePlayPause()
-              activityScope.launch { playbackReporter.reportCurrentPosition() }
+            onControlsToggle = {
+              if (!controlsPanelVisible.value) showControlsPanel() else dismissControlsPanel()
             },
-            onStop = {
-              // Capture position before stopping player (stop resets position to 0)
-              val positionMs = exoPlayerSource.player.currentPosition
-              exoPlayerSource.stop()
-              lastWiredAudioSessionId = 0
-              roomAcousticsController.disable()
-              activityScope.launch {
-                playbackReporter.stopReportingAtPosition(positionMs)
-              }
-              // Auto-show browse panel for next selection
-              if (!browsePanelVisible.value) {
-                browsePanelVisible.value = true
-                spawnBrowsePanel()
-              }
-            },
+            onPlayPauseToggle = { handlePlayPause() },
+            onStop = { handleStop() },
             onSeekForward = { exoPlayerSource.seekForward() },
             onSeekBackward = { exoPlayerSource.seekBackward() },
         )
@@ -289,11 +311,21 @@ class JellyQuestActivity : AppSystemActivity() {
     // The screen wall cutout provides a natural masking border around the video.
     // Separate frame entities are not used because VideoSurfacePanelRegistration renders
     // as a compositor layer, which doesn't share depth testing with regular mesh entities.
+
+    // Subtitle overlay floats in front of the frame's bottom band.
+    subtitleEntity?.destroy()
+    subtitleEntity =
+        Entity.createPanelEntity(
+            R.id.subtitle_panel,
+            Transform(TheaterLayout.subtitlePose(a, screen)),
+        )
   }
 
   private fun respawnScreen() {
     screenEntity?.destroy()
     screenEntity = null
+    subtitleEntity?.destroy()
+    subtitleEntity = null
     spawnScreen()
   }
 
@@ -302,12 +334,55 @@ class JellyQuestActivity : AppSystemActivity() {
     Log.i(TAG, "spawnBrowsePanel: creating entity")
     browsePanelEntity?.destroy()
 
-    val pose = ViewerLayout.browsePanelPose(a, theaterState.value.riserHeightM)
+    val pose = customBrowsePose ?: ViewerLayout.browsePanelPose(a, theaterState.value.riserHeightM)
     browsePanelEntity =
         Entity.createPanelEntity(
             R.id.browse_panel,
             Transform(pose),
         )
+    spawnBrowseHandle(pose)
+  }
+
+  /** Purple grab bar floating above the browse panel — PanelDragSystem's target. */
+  private fun spawnBrowseHandle(panelPose: Pose) {
+    browseHandleEntity?.destroy()
+    browseHandleEntity = Entity.create(listOf(
+        Box(
+            Vector3(-ViewerLayout.HANDLE_HALF_WIDTH, -ViewerLayout.HANDLE_HALF_THICKNESS, -ViewerLayout.HANDLE_HALF_THICKNESS),
+            Vector3(ViewerLayout.HANDLE_HALF_WIDTH, ViewerLayout.HANDLE_HALF_THICKNESS, ViewerLayout.HANDLE_HALF_THICKNESS),
+        ),
+        Mesh("mesh://box".toUri(), hittable = MeshCollision.NoCollision),
+        Material().apply {
+          baseColor = Color4(0.74f, 0.58f, 0.98f, 1f) // Dracula purple
+          unlit = true
+        },
+        Transform(ViewerLayout.browseHandlePose(panelPose)),
+    ))
+  }
+
+  /** Current world pose of the browse panel, for the drag system. */
+  fun currentBrowsePanelPose(): Pose? =
+      browsePanelEntity?.tryGetComponent<Transform>()?.transform
+
+  /** Short vibration on the right controller. Best-effort — never throws. */
+  fun hapticPulse(amplitude: Float, durationMs: Long) {
+    try {
+      spatial.applyHapticFeedback(Hand.RIGHT, amplitude, durationMs, 0.5f)
+    } catch (e: Throwable) {
+      Log.w(TAG, "Haptic pulse failed: ${e.message}")
+    }
+  }
+
+  /** Move the browse panel (and its handle) to [position], re-facing the viewer. */
+  fun moveBrowsePanel(position: Vector3) {
+    val a = anchor ?: return
+    val dx = position.x - a.position.x
+    val dz = position.z - a.position.z
+    val yawDeg = Math.toDegrees(Math.atan2(dx.toDouble(), dz.toDouble())).toFloat()
+    val pose = Pose(position, Quaternion(ViewerLayout.BROWSE_TILT_DEG, yawDeg, 0f))
+    customBrowsePose = pose
+    browsePanelEntity?.setComponent(Transform(pose))
+    browseHandleEntity?.setComponent(Transform(ViewerLayout.browseHandlePose(pose)))
   }
 
   private fun dismissBrowsePanel() {
@@ -315,6 +390,63 @@ class JellyQuestActivity : AppSystemActivity() {
     browsePanelVisible.value = false
     browsePanelEntity?.destroy()
     browsePanelEntity = null
+    browseHandleEntity?.destroy()
+    browseHandleEntity = null
+  }
+
+  private fun showControlsPanel() {
+    val a = anchor ?: return
+    controlsPanelEntity?.destroy()
+    controlsPanelVisible.value = true
+    val pose = ViewerLayout.controlsPanelPose(a, theaterState.value.riserHeightM)
+    controlsPanelEntity =
+        Entity.createPanelEntity(
+            R.id.controls_panel,
+            Transform(pose),
+        )
+  }
+
+  private fun dismissControlsPanel() {
+    controlsPanelVisible.value = false
+    controlsPanelEntity?.destroy()
+    controlsPanelEntity = null
+  }
+
+  private fun handlePlayPause() {
+    exoPlayerSource.togglePlayPause()
+    activityScope.launch { playbackReporter.reportCurrentPosition() }
+    // Pausing brings up the HUD; resuming clears it. These (plus the stick
+    // click / Y toggle) are the ONLY ways the HUD appears — never on its own.
+    if (!exoPlayerSource.isBumperPlaying) {
+      if (!exoPlayerSource.player.playWhenReady) {
+        showControlsPanel()
+      } else {
+        dismissControlsPanel()
+      }
+    }
+  }
+
+  private fun handleSeekTo(positionMs: Long) {
+    exoPlayerSource.player.seekTo(positionMs)
+    activityScope.launch { playbackReporter.reportCurrentPosition() }
+  }
+
+  private fun handleStop() {
+    // Capture position before stopping player (stop resets position to 0)
+    val positionMs = exoPlayerSource.player.currentPosition
+    exoPlayerSource.stop()
+    lastWiredAudioSessionId = 0
+    roomAcousticsController.disable()
+    activityScope.launch {
+      playbackReporter.stopReportingAtPosition(positionMs)
+    }
+    dismissControlsPanel()
+    resetAmbientColor()
+    // Auto-show browse panel for next selection
+    if (!browsePanelVisible.value) {
+      browsePanelVisible.value = true
+      spawnBrowsePanel()
+    }
   }
 
   private fun currentExperience(): TheaterExperience? {
@@ -331,6 +463,7 @@ class JellyQuestActivity : AppSystemActivity() {
     armrestEntities = emptyList()
     environmentModelEntity?.destroy()
     environmentModelEntity = null
+    tintableEntities.clear()
 
     val envPos = TheaterLayout.environmentPosition(a)
     val screen = theaterState.value.screen
@@ -338,14 +471,16 @@ class JellyQuestActivity : AppSystemActivity() {
     val experience = currentExperience()
 
     // Skybox: near-black sphere centered on the user
+    val skyboxColor = Color4(0.05f, 0.05f, 0.07f, 1f)
     skyboxEntity = Entity.create(listOf(
         Mesh("mesh://skybox".toUri(), hittable = MeshCollision.NoCollision),
         Material().apply {
-          baseColor = Color4(0.05f, 0.05f, 0.07f, 1f)
+          baseColor = skyboxColor
           unlit = true
         },
         Transform(Pose(envPos)),
     ))
+    skyboxEntity?.let { tintableEntities.add(TintSurface(it, skyboxColor, 0.7f)) }
 
     val asset = experience?.environmentAsset
     if (asset != null) {
@@ -386,15 +521,17 @@ class JellyQuestActivity : AppSystemActivity() {
     // Floor: dark charcoal ground plane centered on the user
     val floorHalfW = room.widthBack / 2f
     val floorHalfD = room.depth / 2f
+    val floorColor = Color4(0.08f, 0.08f, 0.08f, 1f)
     floorEntity = Entity.create(listOf(
         Box(Vector3(-floorHalfW, -0.005f, -floorHalfD), Vector3(floorHalfW, 0.005f, floorHalfD)),
         Mesh("mesh://box".toUri(), hittable = MeshCollision.NoCollision),
         Material().apply {
-          baseColor = Color4(0.08f, 0.08f, 0.08f, 1f)
+          baseColor = floorColor
           unlit = true
         },
         Transform(Pose(envPos)),
     ))
+    floorEntity?.let { tintableEntities.add(TintSurface(it, floorColor, 1f)) }
 
     // Walls and ceiling
     val wallLength = TheaterLayout.wallLength(screen, room)
@@ -457,10 +594,29 @@ class JellyQuestActivity : AppSystemActivity() {
             TheaterLayout.ceilingPose(a, screen, room),
         ),
     )
+
+    // Theater furnishings: stadium seating, aisle lights, wall panels,
+    // ceiling strips, stage apron — every piece joins the ambient light sim.
+    val seatDistances = currentExperience()?.seats?.map { it.distanceM }
+        ?: listOf(screen.distanceM)
+    for (piece in TheaterDecor.build(a, screen, room, seatDistances)) {
+      // Only fixtures and the stage join the live light sim — re-tinting every
+      // seat row every tick overwhelmed the renderer and froze the headset.
+      createBoxEntity(
+          Box(piece.min, piece.max), piece.color, piece.pose, piece.gain,
+          tintable = piece.gain >= 1.4f,
+      )
+    }
   }
 
-  private fun createBoxEntity(box: Box, color: Color4, pose: Pose): Entity {
-    return Entity.create(listOf(
+  private fun createBoxEntity(
+      box: Box,
+      color: Color4,
+      pose: Pose,
+      tintGain: Float = 1f,
+      tintable: Boolean = true,
+  ): Entity {
+    val entity = Entity.create(listOf(
         box,
         Mesh("mesh://box".toUri(), hittable = MeshCollision.NoCollision),
         Material().apply {
@@ -469,6 +625,62 @@ class JellyQuestActivity : AppSystemActivity() {
         },
         Transform(Pose(pose.t, pose.q)),
     ))
+    if (tintable) {
+      tintableEntities.add(TintSurface(entity, color, tintGain))
+    }
+    return entity
+  }
+
+  /**
+   * Smooth the sampled screen color and re-tint the room surfaces — virtual
+   * "bias lighting" so a bright screen brightens the theater and a dark scene
+   * lets it fall away. The room's materials are unlit, so this multiplies
+   * their base colors directly rather than going through the light rig.
+   */
+  private fun applyAmbientColor(r: Float, g: Float, b: Float) {
+    // Exponential smoothing keeps cuts from strobing the room. High enough
+    // that the room visibly tracks the screen within a beat.
+    ambientR += 0.55f * (r - ambientR)
+    ambientG += 0.55f * (g - ambientG)
+    ambientB += 0.55f * (b - ambientB)
+
+    // Material writes are expensive for the renderer: cap the rate and skip
+    // entirely when the color hasn't visibly changed.
+    val now = android.os.SystemClock.uptimeMillis()
+    if (now - lastTintApplyMs < 100) return
+    val delta = Math.abs(ambientR - appliedR) + Math.abs(ambientG - appliedG) + Math.abs(ambientB - appliedB)
+    if (delta < 0.015f) return
+    lastTintApplyMs = now
+    appliedR = ambientR
+    appliedG = ambientG
+    appliedB = ambientB
+
+    for ((entity, base, gain) in tintableEntities) {
+      // A floor keeps the room from going pitch black; gain scales how hard
+      // this particular surface reacts to the screen.
+      entity.setComponent(Material().apply {
+        baseColor = Color4(
+            (base.red * (0.35f + 2.2f * gain * ambientR)).coerceAtMost(1f),
+            (base.green * (0.35f + 2.2f * gain * ambientG)).coerceAtMost(1f),
+            (base.blue * (0.35f + 2.2f * gain * ambientB)).coerceAtMost(1f),
+            base.alpha,
+        )
+        unlit = true
+      })
+    }
+  }
+
+  /** Restore the room's authored colors (used when playback stops). */
+  private fun resetAmbientColor() {
+    ambientR = 0.5f
+    ambientG = 0.5f
+    ambientB = 0.5f
+    for ((entity, base, _) in tintableEntities) {
+      entity.setComponent(Material().apply {
+        baseColor = base
+        unlit = true
+      })
+    }
   }
 
   private fun applyTheaterPreset(theater: TheaterExperience, seat: SeatPosition) {
@@ -549,11 +761,16 @@ class JellyQuestActivity : AppSystemActivity() {
     if (browsePanelVisible.value) {
       spawnBrowsePanel()
     }
+    if (controlsPanelVisible.value) {
+      showControlsPanel()
+    }
   }
 
   override fun onRecenter(isUserInitiated: Boolean) {
     super.onRecenter(isUserInitiated)
     Log.i(TAG, "onRecenter: userInitiated=$isUserInitiated")
+    // A recenter moves world coordinates; a dragged panel position is stale.
+    customBrowsePose = null
     // Preserve current riser height — recenter reorients but keeps seat elevation
     scene.setViewOrigin(0.0f, theaterState.value.riserHeightM, 0.0f)
     if (!captureAnchor()) {
@@ -645,9 +862,7 @@ class JellyQuestActivity : AppSystemActivity() {
                           playbackReporter.startReporting(freshItem.id)
 
                           // Hide browse panel after selecting media
-                          browsePanelVisible.value = false
-                          browsePanelEntity?.destroy()
-                          browsePanelEntity = null
+                          dismissBrowsePanel()
                         }
                       },
                       currentScreen = theaterState.value.screen,
@@ -679,13 +894,73 @@ class JellyQuestActivity : AppSystemActivity() {
             },
             settingsCreator = {
               UIPanelSettings(
-                  shape = QuadShapeOptions(width = 0.5f, height = 0.65f),
+                  shape = QuadShapeOptions(width = 1.1f, height = 0.75f),
                   style = PanelStyleOptions(themeResourceId = R.style.PanelAppThemeTransparent),
                   display = DpPerMeterDisplayOptions(dpPerMeter = 800f),
                   input = PanelInputOptions(
                       ButtonBits.ButtonTriggerL or ButtonBits.ButtonTriggerR
                   ),
               )
+            },
+        ),
+        // Playback controls HUD (auto-shown on pause, toggled via Y button)
+        ComposeViewPanelRegistration(
+            R.id.controls_panel,
+            composeViewCreator = { _, ctx ->
+              ComposeView(ctx).apply {
+                setContent {
+                  PlaybackControlsPanel(
+                      exoPlayerSource = exoPlayerSource,
+                      onPlayPause = { handlePlayPause() },
+                      onStop = { handleStop() },
+                      onSeekTo = { positionMs -> handleSeekTo(positionMs) },
+                      onHide = { dismissControlsPanel() },
+                      onButtonHover = { hapticPulse(0.18f, 8) },
+                  )
+                }
+              }
+            },
+            settingsCreator = {
+              UIPanelSettings(
+                  shape = QuadShapeOptions(width = 0.7f, height = 0.33f),
+                  style = PanelStyleOptions(themeResourceId = R.style.PanelAppThemeTransparent),
+                  display = DpPerMeterDisplayOptions(dpPerMeter = 800f),
+                  input = PanelInputOptions(
+                      ButtonBits.ButtonTriggerL or ButtonBits.ButtonTriggerR
+                  ),
+              )
+            },
+        ),
+        // Subtitle overlay — transparent, non-interactive, sized to the screen.
+        // The movie renders as a compositor layer at zIndex 0; this panel must
+        // composite ABOVE it or the video covers the subtitles, so we wrap the
+        // settings to force the panel's layer zIndex to 1.
+        ComposeViewPanelRegistration(
+            R.id.subtitle_panel,
+            composeViewCreator = { _, ctx ->
+              ComposeView(ctx).apply {
+                setContent {
+                  SubtitlePanel(exoPlayerSource = exoPlayerSource)
+                }
+              }
+            },
+            settingsCreator = {
+              val screen = theaterState.value.screen
+              // Match the fitted (letterboxed) video frame exactly, so cue
+              // geometry maps 1:1 onto the picture.
+              val (fitW, fitH) = fitVideoToScreen(screen.widthM, screen.heightM, videoWidth, videoHeight)
+              val base = UIPanelSettings(
+                  shape = QuadShapeOptions(width = fitW, height = fitH),
+                  style = PanelStyleOptions(themeResourceId = R.style.PanelAppThemeTransparent),
+                  display = DpPerMeterDisplayOptions(dpPerMeter = 300f),
+              )
+              object : PanelSettings {
+                override fun toPanelConfigOptions(): PanelConfigOptions {
+                  val opts = base.toPanelConfigOptions()
+                  opts.layerConfig?.let { it.zIndex = 1 }
+                  return opts
+                }
+              }
             },
         ),
     )

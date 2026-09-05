@@ -2,4 +2,6 @@
 <resources>
   <item type="id" name="screen_panel" />
   <item type="id" name="browse_panel" />
+  <item type="id" name="controls_panel" />
+  <item type="id" name="subtitle_panel" />
 </resources>

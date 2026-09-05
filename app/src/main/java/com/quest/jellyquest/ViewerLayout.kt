@@ -16,11 +16,34 @@ object ViewerLayout {
 
     const val SEATED_EYE_HEIGHT = 1.1f
 
-    // Browse panel placement relative to viewer
-    const val BROWSE_FORWARD = 0.6f
-    const val BROWSE_LEFT = 0.4f
-    const val BROWSE_BELOW_EYE = 0.2f
-    const val BROWSE_TILT_DEG = 15f
+    // Browse panel placement relative to viewer: close by, off to the left at
+    // roughly 45°, angled to face the viewer — out of the movie screen's
+    // sightline and clear of the playback HUD. Also grabbable, so this is just
+    // the starting position.
+    const val BROWSE_FORWARD = 0.55f
+    const val BROWSE_LEFT = 0.6f
+    const val BROWSE_BELOW_EYE = 0.1f
+    const val BROWSE_TILT_DEG = 10f
+
+    // Grab handle bar above the browse panel (drag target for PanelDragSystem)
+    const val HANDLE_HALF_WIDTH = 0.11f
+    const val HANDLE_HALF_THICKNESS = 0.016f
+    const val BROWSE_PANEL_HEIGHT = 0.75f
+    const val HANDLE_LIFT = BROWSE_PANEL_HEIGHT / 2f + 0.05f
+
+    /** Handle bar pose: floats just above the browse panel's top edge. */
+    fun browseHandlePose(panelPose: Pose): Pose {
+        return Pose(
+            Vector3(panelPose.t.x, panelPose.t.y + HANDLE_LIFT, panelPose.t.z),
+            panelPose.q,
+        )
+    }
+
+    // Playback controls HUD placement relative to viewer — centered, below the
+    // sight line to the screen, tilted up like a remote resting on a lap tray.
+    const val CONTROLS_FORWARD = 0.55f
+    const val CONTROLS_BELOW_EYE = 0.32f
+    const val CONTROLS_TILT_DEG = 25f
 
     // Armrest dimensions and placement
     const val ARMREST_LENGTH = 0.45f       // front to back
@@ -38,6 +61,20 @@ object ViewerLayout {
             lateral * ARMREST_SIDE_OFFSET
         val y = SEATED_EYE_HEIGHT + riserHeightM - ARMREST_BELOW_EYE
         return Pose(Vector3(xz.x, y, xz.z), anchor.rotation)
+    }
+
+    /**
+     * Position the playback controls HUD centered in front of the viewer,
+     * below the sight line to the screen so it never occludes the movie.
+     */
+    fun controlsPanelPose(anchor: Anchor, riserHeightM: Float): Pose {
+        val xz = anchor.position + anchor.forward * CONTROLS_FORWARD
+        val position = Vector3(xz.x, SEATED_EYE_HEIGHT + riserHeightM - CONTROLS_BELOW_EYE, xz.z)
+
+        val dx = position.x - anchor.position.x
+        val dz = position.z - anchor.position.z
+        val yawDeg = Math.toDegrees(Math.atan2(dx.toDouble(), dz.toDouble())).toFloat()
+        return Pose(position, Quaternion(CONTROLS_TILT_DEG, yawDeg, 0f))
     }
 
     /**

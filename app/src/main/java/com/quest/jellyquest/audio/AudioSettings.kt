@@ -4,7 +4,8 @@ import android.content.SharedPreferences
 
 /**
  * Persists spatial audio and room acoustics toggle state.
- * Both default to ON. Accepts SharedPreferences via constructor for testability.
+ * Spatial audio defaults to ON; room acoustics defaults to OFF (opt-in).
+ * Accepts SharedPreferences via constructor for testability.
  */
 class AudioSettings(private val prefs: SharedPreferences) {
 
@@ -18,6 +19,6 @@ class AudioSettings(private val prefs: SharedPreferences) {
         set(value) { prefs.edit().putBoolean(KEY_SPATIAL_AUDIO, value).apply() }
 
     var roomAcousticsEnabled: Boolean
-        get() = prefs.getBoolean(KEY_ROOM_ACOUSTICS, true)
+        get() = prefs.getBoolean(KEY_ROOM_ACOUSTICS, false)
         set(value) { prefs.edit().putBoolean(KEY_ROOM_ACOUSTICS, value).apply() }
 }

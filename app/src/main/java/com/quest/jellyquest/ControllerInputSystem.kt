@@ -8,18 +8,25 @@ import com.meta.spatial.toolkit.AvatarBody
 import com.meta.spatial.toolkit.Controller
 
 /**
- * Maps controller buttons to app actions.
+ * Maps controller buttons to app actions. Everything is reachable from the
+ * right controller alone; the left controller carries duplicate bindings.
  *
- * Left controller:
- *   X — toggle browse panel
- *   Thumbstick left/right — seek backward/forward 10s
- *
- * Right controller:
+ * Right controller (primary):
  *   A — play/pause
  *   B — stop + return to browse
+ *   Thumbstick left/right — seek backward/forward 10s
+ *   Thumbstick click — toggle playback controls HUD
+ *   Grip (squeeze) — toggle browse panel
+ *
+ * Left controller (duplicates):
+ *   X — toggle browse panel
+ *   Y — toggle playback controls HUD
+ *   Thumbstick left/right — seek backward/forward 10s
  */
 class ControllerInputSystem(
+    private val isBrowseVisible: () -> Boolean = { false },
     private val onBrowseToggle: () -> Unit = {},
+    private val onControlsToggle: () -> Unit = {},
     private val onPlayPauseToggle: () -> Unit = {},
     private val onStop: () -> Unit = {},
     private val onSeekForward: () -> Unit = {},
@@ -35,6 +42,9 @@ class ControllerInputSystem(
   private var aButtonHandled = false
   private var bButtonHandled = false
   private var xButtonHandled = false
+  private var yButtonHandled = false
+  private var rClickHandled = false
+  private var rSqueezeHandled = false
 
   // Seek cooldown: thumbstick is continuous, so we throttle seek events
   private var lastSeekTime = 0L
@@ -72,6 +82,51 @@ class ControllerInputSystem(
       bButtonHandled = false
     }
 
+    // While the browse panel is open, the right thumbstick belongs to it
+    // (scrolling the grid) — suppress stick-click HUD toggle and stick seeks,
+    // which otherwise fire from accidental presses during scroll flicks.
+    val browseOpen = isBrowseVisible()
+
+    // Right thumbstick click → toggle playback controls HUD
+    val rClickDown = (rightController.buttonState and ButtonBits.ButtonThumbRClick) != 0
+    val rClickChanged = (rightController.changedButtons and ButtonBits.ButtonThumbRClick) != 0
+    if (rClickDown && rClickChanged && !rClickHandled) {
+      rClickHandled = true
+      if (!browseOpen) {
+        Log.d(TAG, "Right thumbstick click → toggle playback controls")
+        onControlsToggle()
+      }
+    } else if (!rClickDown && rClickChanged) {
+      rClickHandled = false
+    }
+
+    // Right grip (squeeze) → toggle browse panel
+    val rSqueezeDown = (rightController.buttonState and ButtonBits.ButtonSqueezeR) != 0
+    val rSqueezeChanged = (rightController.changedButtons and ButtonBits.ButtonSqueezeR) != 0
+    if (rSqueezeDown && rSqueezeChanged && !rSqueezeHandled) {
+      rSqueezeHandled = true
+      Log.d(TAG, "Right grip → toggle browse")
+      onBrowseToggle()
+    } else if (!rSqueezeDown && rSqueezeChanged) {
+      rSqueezeHandled = false
+    }
+
+    // Right thumbstick left/right → seek backward/forward (continuous with cooldown)
+    val nowR = System.currentTimeMillis()
+    if (!browseOpen && nowR - lastSeekTime >= SEEK_COOLDOWN_MS) {
+      val rThumbLeft = (rightController.buttonState and ButtonBits.ButtonThumbRL) != 0
+      val rThumbRight = (rightController.buttonState and ButtonBits.ButtonThumbRR) != 0
+      if (rThumbLeft) {
+        Log.d(TAG, "Right thumbstick left → seek backward")
+        onSeekBackward()
+        lastSeekTime = nowR
+      } else if (rThumbRight) {
+        Log.d(TAG, "Right thumbstick right → seek forward")
+        onSeekForward()
+        lastSeekTime = nowR
+      }
+    }
+
     // X button (left controller) → toggle browse panel
     leftController?.let { controller ->
       val xDown = (controller.buttonState and ButtonBits.ButtonX) != 0
@@ -84,9 +139,20 @@ class ControllerInputSystem(
         xButtonHandled = false
       }
 
+      // Y button (left controller) → toggle playback controls HUD
+      val yDown = (controller.buttonState and ButtonBits.ButtonY) != 0
+      val yChanged = (controller.changedButtons and ButtonBits.ButtonY) != 0
+      if (yDown && yChanged && !yButtonHandled) {
+        yButtonHandled = true
+        Log.d(TAG, "Y button pressed → toggle playback controls")
+        onControlsToggle()
+      } else if (!yDown && yChanged) {
+        yButtonHandled = false
+      }
+
       // Left thumbstick left/right → seek backward/forward (continuous with cooldown)
       val now = System.currentTimeMillis()
-      if (now - lastSeekTime >= SEEK_COOLDOWN_MS) {
+      if (!browseOpen && now - lastSeekTime >= SEEK_COOLDOWN_MS) {
         val thumbLeft = (controller.buttonState and ButtonBits.ButtonThumbLL) != 0
         val thumbRight = (controller.buttonState and ButtonBits.ButtonThumbLR) != 0
         if (thumbLeft) {

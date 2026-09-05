@@ -17,6 +17,16 @@ object TheaterLayout {
         return Pose(position, anchor.rotation)
     }
 
+    // Subtitle overlay: congruent with the video frame, nudged toward the
+    // viewer so it never z-fights the video compositor layer.
+    private const val SUBTITLE_FORWARD_OFFSET = 0.08f
+
+    /** Pose for the subtitle overlay panel — centered on the video frame. */
+    fun subtitlePose(anchor: Anchor, screen: ScreenConfig): Pose {
+        val xz = anchor.position + anchor.forward * (screen.distanceM - SUBTITLE_FORWARD_OFFSET)
+        return Pose(Vector3(xz.x, screen.screenCenterY, xz.z), anchor.rotation)
+    }
+
     /** Compute the environment origin (skybox, floor) from anchor XZ at floor level. */
     fun environmentPosition(anchor: Anchor): Vector3 {
         return Vector3(anchor.position.x, 0f, anchor.position.z)

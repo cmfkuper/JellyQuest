@@ -24,3 +24,6 @@ assets/cinema_multiplex_boosted.glb
 # Tooling
 .serena/
 __pycache__/
+
+# Blender render outputs (script is source; renders are artifacts)
+blender/renders/

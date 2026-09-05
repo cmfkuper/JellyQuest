@@ -7,7 +7,7 @@ plugins {
 
 android {
   namespace = "com.quest.jellyquest"
-  compileSdk = 34
+  compileSdk = 36
 
   defaultConfig {
     applicationId = "com.quest.jellyquest"
@@ -82,6 +82,9 @@ dependencies {
   // Jellyfin SDK
   implementation(libs.jellyfin.core)
   implementation(libs.slf4j.android)
+
+  // Poster image loading
+  implementation(libs.coil.compose)
 
   // ExoPlayer (Media3)
   implementation(libs.media3.exoplayer)

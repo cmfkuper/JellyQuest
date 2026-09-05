@@ -25,6 +25,7 @@ import org.jellyfin.sdk.model.ClientInfo
 import org.jellyfin.sdk.model.api.AuthenticateUserByName
 import org.jellyfin.sdk.model.api.BaseItemDto
 import org.jellyfin.sdk.model.api.BaseItemKind
+import org.jellyfin.sdk.model.api.ItemFields
 import org.jellyfin.sdk.model.api.ItemSortBy
 import org.jellyfin.sdk.model.api.PlayMethod
 import org.jellyfin.sdk.model.api.PlaybackOrder
@@ -50,7 +51,25 @@ data class JellyfinItem(
     val isFolder: Boolean,
     val playbackPositionTicks: Long = 0,
     val runTimeTicks: Long = 0,
+    val genres: List<String> = emptyList(),
+    val dateCreatedMs: Long = 0,
+    val communityRating: Float = 0f,
+    val played: Boolean = false,
 ) {
+    /**
+     * Key used for A–Z sorting and the alphabet jump strip: display name with
+     * leading English articles stripped, matching Jellyfin's SortName behavior.
+     */
+    val sortKey: String
+        get() {
+            for (article in listOf("The ", "An ", "A ")) {
+                if (name.startsWith(article, ignoreCase = true) && name.length > article.length) {
+                    return name.substring(article.length).trimStart()
+                }
+            }
+            return name
+        }
+
     fun toJson() = JSONObject().apply {
         put("id", id.toString())
         put("name", name)
@@ -58,17 +77,30 @@ data class JellyfinItem(
         put("isFolder", isFolder)
         put("playbackPositionTicks", playbackPositionTicks)
         put("runTimeTicks", runTimeTicks)
+        put("genres", JSONArray(genres))
+        put("dateCreatedMs", dateCreatedMs)
+        put("communityRating", communityRating.toDouble())
+        put("played", played)
     }
 
     companion object {
-        fun fromJson(json: JSONObject) = JellyfinItem(
-            id = UUID.fromString(json.getString("id")),
-            name = json.getString("name"),
-            type = BaseItemKind.valueOf(json.getString("type")),
-            isFolder = json.getBoolean("isFolder"),
-            playbackPositionTicks = json.optLong("playbackPositionTicks", 0),
-            runTimeTicks = json.optLong("runTimeTicks", 0),
-        )
+        fun fromJson(json: JSONObject): JellyfinItem {
+            val genresArr = json.optJSONArray("genres")
+            return JellyfinItem(
+                id = UUID.fromString(json.getString("id")),
+                name = json.getString("name"),
+                type = BaseItemKind.valueOf(json.getString("type")),
+                isFolder = json.getBoolean("isFolder"),
+                playbackPositionTicks = json.optLong("playbackPositionTicks", 0),
+                runTimeTicks = json.optLong("runTimeTicks", 0),
+                genres = if (genresArr != null) {
+                    (0 until genresArr.length()).map { genresArr.getString(it) }
+                } else emptyList(),
+                dateCreatedMs = json.optLong("dateCreatedMs", 0),
+                communityRating = json.optDouble("communityRating", 0.0).toFloat(),
+                played = json.optBoolean("played", false),
+            )
+        }
     }
 }
 
@@ -86,7 +118,7 @@ class JellyfinClient(private val context: Context) {
         private const val KEY_USER_ID = "user_id"
 
         // Fallback only — used when local network discovery finds no server.
-        const val DEFAULT_SERVER_URL = "http://192.168.1.9:8096"
+        const val DEFAULT_SERVER_URL = "http://192.168.1.178:8899"
 
         // Local server discovery (SDK UDP broadcast, port 7359) timeout.
         private const val DISCOVERY_TIMEOUT_MS = 3_000
@@ -325,6 +357,7 @@ class JellyfinClient(private val context: Context) {
                     userId = userId,
                     parentId = parentId,
                     sortBy = listOf(ItemSortBy.SORT_NAME),
+                    fields = listOf(ItemFields.GENRES, ItemFields.DATE_CREATED),
                     includeItemTypes = listOf(
                         BaseItemKind.MOVIE,
                         BaseItemKind.SERIES,
@@ -529,6 +562,10 @@ class JellyfinClient(private val context: Context) {
         )),
         playbackPositionTicks = this.userData?.playbackPositionTicks ?: 0,
         runTimeTicks = this.runTimeTicks ?: 0,
+        genres = this.genres ?: emptyList(),
+        dateCreatedMs = this.dateCreated?.toInstant(java.time.ZoneOffset.UTC)?.toEpochMilli() ?: 0,
+        communityRating = this.communityRating ?: 0f,
+        played = this.userData?.played ?: false,
     )
 }
 
