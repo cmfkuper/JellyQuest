@@ -48,7 +48,18 @@ AISLE_CENTERS = [-4.5, 4.5]
 AISLE_HALF = 0.65
 
 CAMERA_ROW = 28.0     # "Middle" seat
-DETAIL_RADIUS = 5.0   # rows within this of the camera get detailed seats
+DETAIL_RADIUS = 2.5   # rows within this of the camera get the high-LOD seat
+
+# AI-generated hero seat (Higgsfield multi-image-to-3D from the reference
+# sheet). Normalized and decimated into two LODs; procedural seats remain the
+# fallback if the file is missing.
+AI_SEAT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seat_ai.glb")
+# Real cinema-seat envelope; the AI model is normalized per-axis to this,
+# because its native proportions are much chunkier than a real chair.
+AI_SEAT_DIMS = (0.72, 0.80, 1.05)  # width, depth, height in meters
+AI_SEAT_LOD_NEAR = 0.18   # ~5.4k tris — rows adjacent to the viewer
+AI_SEAT_LOD_FAR = 0.06    # ~1.8k tris — everything else
+SEAT_ARC_PITCH = 0.70     # spacing tuned to the normalized width (shared-arm look)
 
 # The app's three seat positions — each gets an empty spot at the aisle center
 # so the viewer never spawns inside a seat.
@@ -197,6 +208,53 @@ def build_seat_template(name, mats, detailed):
     return seat
 
 
+def load_ai_seat_template(name, decimate_ratio):
+    """Import the AI seat GLB, normalize (origin at floor center, real-world
+    height, facing -y as authored), and decimate to the requested LOD."""
+    before = set(bpy.data.objects)
+    bpy.ops.import_scene.gltf(filepath=AI_SEAT_PATH)
+    imported = [o for o in bpy.data.objects if o not in before]
+    meshes = [o for o in imported if o.type == "MESH"]
+    for o in imported:
+        o.select_set(o in meshes)
+    bpy.context.view_layer.objects.active = meshes[0]
+    if len(meshes) > 1:
+        bpy.ops.object.join()
+    obj = bpy.context.view_layer.objects.active
+    for o in imported:
+        if o.type != "MESH" and o.name in bpy.data.objects:
+            bpy.data.objects.remove(o, do_unlink=True)
+    obj.name = name
+
+    bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+    xs = [v.co.x for v in obj.data.vertices]
+    ys = [v.co.y for v in obj.data.vertices]
+    zs = [v.co.z for v in obj.data.vertices]
+    obj.location = (-(max(xs) + min(xs)) / 2, -(max(ys) + min(ys)) / 2, -min(zs))
+    bpy.ops.object.transform_apply(location=True)
+    # Per-axis normalization to a real seat envelope — the AI model's native
+    # proportions are far too wide and deep for row spacing.
+    obj.scale = (
+        AI_SEAT_DIMS[0] / (max(xs) - min(xs)),
+        AI_SEAT_DIMS[1] / (max(ys) - min(ys)),
+        AI_SEAT_DIMS[2] / (max(zs) - min(zs)),
+    )
+    bpy.ops.object.transform_apply(scale=True)
+
+    mod = obj.modifiers.new("Decimate", "DECIMATE")
+    mod.ratio = decimate_ratio
+    bpy.ops.object.modifier_apply(modifier=mod.name)
+    # Re-smooth after decimation — collapsed triangles otherwise render as
+    # sharp slashes across the upholstery.
+    try:
+        bpy.ops.object.shade_auto_smooth(angle=math.radians(50))
+    except Exception:
+        bpy.ops.object.shade_smooth()
+    tris = sum(len(p.vertices) - 2 for p in obj.data.polygons)
+    print(f"AI seat '{name}': ratio={decimate_ratio} tris={tris}")
+    return obj
+
+
 def place_seat(template, x, y, z, face_angle):
     dup = template.copy()  # shares mesh data — cheap instancing
     dup.location = (x, y, z)
@@ -306,8 +364,12 @@ def build():
             add_box(f"Down{ix}_{iy}", (0.4, 0.4, 0.06), (ix, y, CEILING - 0.05), downlight)
 
     # --- Seating: curved raked rows with aisles ---
-    detailed = build_seat_template("SeatDetailed", (fabric, frame), detailed=True)
-    simple = build_seat_template("SeatSimple", (fabric, frame), detailed=False)
+    if os.path.exists(AI_SEAT_PATH):
+        detailed = load_ai_seat_template("SeatDetailed", AI_SEAT_LOD_NEAR)
+        simple = load_ai_seat_template("SeatSimple", AI_SEAT_LOD_FAR)
+    else:
+        detailed = build_seat_template("SeatDetailed", (fabric, frame), detailed=True)
+        simple = build_seat_template("SeatSimple", (fabric, frame), detailed=False)
     # Park the templates out of sight; only their copies populate the house.
     detailed.location = (0, -100, 0)
     simple.location = (0, -100, 0)
@@ -328,18 +390,20 @@ def build():
                         (ax, d - ROW_PITCH / 2 + 0.06, rise + 0.017), amber)
 
         # Seats along an arc centered on the screen
-        n = int((2 * half_row) / SEAT_PITCH)
+        n = int((2 * half_row) / SEAT_ARC_PITCH)
         for i in range(n):
-            arc = (i - (n - 1) / 2) * SEAT_PITCH
+            arc = (i - (n - 1) / 2) * SEAT_ARC_PITCH
             theta = arc / d
             x = d * math.sin(theta)
             y = d * math.cos(theta)
             if any(abs(x - a) < AISLE_HALF + 0.3 for a in AISLE_CENTERS):
                 continue
             # Each app seat position (Front/Middle/Back) gets an empty spot.
-            if abs(x) < 0.6 and any(abs(d - vr) < 0.6 for vr in VIEWER_ROWS):
+            if abs(x) < 0.75 and any(abs(d - vr) < 0.6 for vr in VIEWER_ROWS):
                 continue
-            place_seat(template, x, y, rise, math.pi - theta)
+            # Template faces -y (toward screen) at rotation 0; -theta aims each
+            # seat at the screen center along the row's arc.
+            place_seat(template, x, y, rise, -theta)
         d += ROW_PITCH
         row_count += 1
 

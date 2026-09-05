@@ -17,6 +17,7 @@ data class Anchor(
     val position: Vector3,    // XZ of user at floor level
     val forward: Vector3,     // horizontal forward direction (toward screen)
     val rotation: Quaternion, // lookRotationAroundY(forward)
+    val headHeight: Float,    // raw head Y at capture (includes any view-origin offset)
 ) {
     /** Direction to the left of forward (in XZ plane). */
     val left: Vector3 get() = Vector3(-forward.z, 0f, forward.x).normalize()
@@ -53,7 +54,7 @@ data class Anchor(
             val rotation = Quaternion.lookRotationAroundY(normalizedForward)
 
             Log.i(TAG, "Anchor captured: pos=$position fwd=$normalizedForward rot=$rotation headPose=${headPose.t}")
-            return Anchor(position, normalizedForward, rotation)
+            return Anchor(position, normalizedForward, rotation, headPose.t.y)
         }
     }
 }

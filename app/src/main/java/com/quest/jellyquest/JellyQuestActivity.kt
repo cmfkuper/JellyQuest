@@ -273,9 +273,29 @@ class JellyQuestActivity : AppSystemActivity() {
     )
   }
 
+  // Seated-height calibration: the layout assumes eyes at SEATED_EYE_HEIGHT
+  // above the theater floor, but the real headset may sit lower (couch,
+  // recliner). Measure the real head height at anchor capture and lift the
+  // view origin by the difference, so the viewer's eyes always land at
+  // movie-seat height regardless of posture.
+  private var viewOriginY = 0f
+  private var eyeBoost = 0f
+
   fun captureAnchor(): Boolean {
-    anchor = Anchor.capture() ?: return false
+    val captured = Anchor.capture() ?: return false
+    anchor = captured
+    // headHeight includes whatever origin offset was active at capture time.
+    val realHeadHeight = captured.headHeight - viewOriginY
+    eyeBoost = (ViewerLayout.SEATED_EYE_HEIGHT - realHeadHeight).coerceIn(-0.4f, 0.7f)
+    Log.i(TAG, "Seated calibration: realHeadHeight=$realHeadHeight eyeBoost=$eyeBoost")
+    applyViewOrigin()
     return true
+  }
+
+  /** Set the view origin from the current seat riser plus the eye-height boost. */
+  private fun applyViewOrigin() {
+    viewOriginY = theaterState.value.riserHeightM + eyeBoost
+    scene.setViewOrigin(0.0f, viewOriginY, 0.0f)
   }
 
   fun spawnScreenFromSystem() {
@@ -731,8 +751,8 @@ class JellyQuestActivity : AppSystemActivity() {
         riserHeightM = seat.riserHeightM,
         room = TheaterEnvironment.computeRoom(theater),
     )
-    scene.setViewOrigin(0.0f, theaterState.value.riserHeightM, 0.0f)
-    Log.i(TAG, "Seat riser height: ${theaterState.value.riserHeightM}m")
+    applyViewOrigin()
+    Log.i(TAG, "Seat riser height: ${theaterState.value.riserHeightM}m (eyeBoost=$eyeBoost)")
     logScreenPosition()
     repositionTheater()
 
@@ -807,8 +827,8 @@ class JellyQuestActivity : AppSystemActivity() {
     Log.i(TAG, "onRecenter: userInitiated=$isUserInitiated")
     // A recenter moves world coordinates; a dragged panel position is stale.
     customBrowsePose = null
-    // Preserve current riser height — recenter reorients but keeps seat elevation
-    scene.setViewOrigin(0.0f, theaterState.value.riserHeightM, 0.0f)
+    // Preserve current riser height — recenter reorients but keeps seat
+    // elevation; captureAnchor re-runs the seated-height calibration.
     if (!captureAnchor()) {
       Log.w(TAG, "onRecenter: failed to capture anchor, retaining previous")
     }
