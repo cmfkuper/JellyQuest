@@ -9,6 +9,11 @@ data class TheaterExperience(
     val ceilingHeightM: Float,
     val seats: List<SeatPosition>,
     val environmentAsset: String? = null,
+    // Lit environments shade from the scene's ambient light (driven live by
+    // the screen's sampled color); unlit ones use baked lighting.
+    val environmentLit: Boolean = false,
+    // Lateral shift of the GLB so the viewer lands in a seat, not the aisle.
+    val environmentLateralOffsetM: Float = 0f,
 ) {
     val hasGlbEnvironment: Boolean get() = environmentAsset != null
 }
@@ -46,6 +51,7 @@ val THEATER_EXPERIENCES = listOf(
             SeatPosition("Back", 18.91f, riserHeightM = 2.66f),
         ),
         environmentAsset = "cinema_multiplex.glb",
+        environmentLateralOffsetM = 0.945f,
     ),
     TheaterExperience(
         name = "Premium Large Format",
@@ -66,6 +72,8 @@ val THEATER_EXPERIENCES = listOf(
         screenHeightM = 15.4f,
         screenBottomM = 0.9f,
         ceilingHeightM = 18.0f,
+        environmentAsset = "cinema_imax.glb",
+        environmentLit = true,
         seats = listOf(
             SeatPosition("Front", 19.5f, riserHeightM = 0.0f),
             SeatPosition("Middle", 28.0f, riserHeightM = 1.81f),

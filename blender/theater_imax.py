@@ -50,7 +50,13 @@ AISLE_HALF = 0.65
 CAMERA_ROW = 28.0     # "Middle" seat
 DETAIL_RADIUS = 5.0   # rows within this of the camera get detailed seats
 
-RENDER_OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "renders", "imax_preview.png")
+# The app's three seat positions — each gets an empty spot at the aisle center
+# so the viewer never spawns inside a seat.
+VIEWER_ROWS = [19.5, 28.0, 38.0]
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+RENDER_OUT = os.path.join(_HERE, "renders", "imax_preview.png")
+GLB_OUT = os.path.normpath(os.path.join(_HERE, "..", "app", "src", "main", "assets", "cinema_imax.glb"))
 
 # ------------------------------------------------------------------- helpers
 
@@ -162,16 +168,16 @@ def build_seat_template(name, mats, detailed):
     fabric, frame = mats
     # pedestal
     parts.append(add_box(f"{name}_ped", (0.5, 0.42, 0.34), (0, 0.05, 0.17), frame))
-    # cushion
+    # cushion (simple seats stay sharp-edged — poly budget goes to near rows)
     parts.append(add_box(
         f"{name}_cushion", (0.52, 0.5, 0.14), (0, 0.0, 0.42), fabric,
-        bevel=0.06 if detailed else 0.03,
+        bevel=0.06 if detailed else 0.0,
     ))
     # backrest, tilted back ~10 deg
     parts.append(add_box(
         f"{name}_back", (0.52, 0.14, 0.72), (0, 0.28, 0.80), fabric,
         rotation=(math.radians(-10), 0, 0),
-        bevel=0.06 if detailed else 0.03,
+        bevel=0.06 if detailed else 0.0,
     ))
     if detailed:
         # headrest bump gives the seat back a recognizable silhouette
@@ -330,8 +336,9 @@ def build():
             y = d * math.cos(theta)
             if any(abs(x - a) < AISLE_HALF + 0.3 for a in AISLE_CENTERS):
                 continue
-            if abs(d - CAMERA_ROW) < 0.6 and abs(x) < 0.6:
-                continue  # the viewer's own seat stays empty
+            # Each app seat position (Front/Middle/Back) gets an empty spot.
+            if abs(x) < 0.6 and any(abs(d - vr) < 0.6 for vr in VIEWER_ROWS):
+                continue
             place_seat(template, x, y, rise, math.pi - theta)
         d += ROW_PITCH
         row_count += 1
@@ -387,5 +394,34 @@ def render():
     print(f"Rendered: {RENDER_OUT}")
 
 
+def export_glb():
+    """Export the theater for the app.
+
+    Stripped for runtime use: the emissive content plane goes away (the app
+    renders the actual movie there as a compositor panel; the black canvas
+    stays as masking), and the parked seat templates are deleted. Blender's
+    +Y (toward the back of the house) maps to glTF -Z, matching the app's
+    'origin at screen wall, extends -Z toward viewer' convention.
+    """
+    for name in ("Screen", "SeatDetailed", "SeatSimple"):
+        obj = bpy.data.objects.get(name)
+        if obj:
+            bpy.data.objects.remove(obj, do_unlink=True)
+    cam = bpy.context.scene.camera
+    if cam:
+        bpy.data.objects.remove(cam, do_unlink=True)
+
+    os.makedirs(os.path.dirname(GLB_OUT), exist_ok=True)
+    bpy.ops.export_scene.gltf(
+        filepath=GLB_OUT,
+        export_format="GLB",
+        export_apply=True,   # bake the bevel modifiers into the meshes
+        export_cameras=False,
+        export_lights=False,
+    )
+    print(f"Exported: {GLB_OUT}")
+
+
 build()
 render()
+export_glb()

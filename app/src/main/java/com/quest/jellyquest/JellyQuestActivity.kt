@@ -484,22 +484,35 @@ class JellyQuestActivity : AppSystemActivity() {
 
     val asset = experience?.environmentAsset
     if (asset != null) {
-      // GLB environment — baked 3D model replaces procedural walls, floor, and ceiling
-      val glbPose = TheaterLayout.glbEnvironmentPose(a, screen)
+      // GLB environment — 3D model replaces procedural walls, floor, and ceiling.
+      // Lit environments shade from scene ambient (driven by the screen's
+      // sampled color); baked environments render unlit.
+      val glbPose = TheaterLayout.glbEnvironmentPose(a, screen, experience.environmentLateralOffsetM)
+      val meshComponent = if (experience.environmentLit) {
+        Mesh(mesh = asset.toUri(), hittable = MeshCollision.NoCollision)
+      } else {
+        Mesh(
+            mesh = asset.toUri(),
+            hittable = MeshCollision.NoCollision,
+            defaultShaderOverride = SceneMaterial.UNLIT_SHADER,
+        )
+      }
       environmentModelEntity = Entity.create(listOf(
-          Mesh(
-              mesh = asset.toUri(),
-              hittable = MeshCollision.NoCollision,
-              defaultShaderOverride = SceneMaterial.UNLIT_SHADER,
-          ),
+          meshComponent,
           Transform(Pose(glbPose.t, glbPose.q)),
       ))
+      // Baseline house light level for lit rooms (the huge default ambient is
+      // sized for unlit content and would blow a lit model out).
+      if (experience.environmentLit) {
+        setSceneAmbient(0.9f, 0.9f, 0.95f)
+      }
       Log.i(TAG, "GLB environment loaded: $asset pos=${glbPose.t} rot=${glbPose.q}")
       Log.i(TAG, "  Anchor pos=${a.position} fwd=${a.forward}")
       Log.i(TAG, "  Model origin at screen wall, extends -Z toward viewer (30m deep)")
       Log.i(TAG, "  Viewer should be ~${screen.distanceM}m from screen wall inside model")
     } else {
       // Procedural box environment — flat-colored walls, floor, and ceiling
+      setSceneAmbient(8.0f, 8.0f, 8.0f)  // restore the unlit-content baseline
       spawnProceduralEnvironment(a, envPos, screen, room)
     }
 
@@ -631,11 +644,23 @@ class JellyQuestActivity : AppSystemActivity() {
     return entity
   }
 
+  private fun setSceneAmbient(r: Float, g: Float, b: Float) {
+    scene.setLightingEnvironment(
+        ambientColor = Vector3(r, g, b),
+        sunColor = Vector3(0.0f, 0.0f, 0.0f),
+        sunDirection = -Vector3(1.0f, 3.0f, -2.0f),
+        environmentIntensity = 0.0f,
+    )
+  }
+
+  private fun litEnvironmentActive(): Boolean =
+      environmentModelEntity != null && currentExperience()?.environmentLit == true
+
   /**
-   * Smooth the sampled screen color and re-tint the room surfaces — virtual
-   * "bias lighting" so a bright screen brightens the theater and a dark scene
-   * lets it fall away. The room's materials are unlit, so this multiplies
-   * their base colors directly rather than going through the light rig.
+   * Smooth the sampled screen color and drive the room's lighting from it —
+   * virtual "bias lighting" so a bright screen brightens the theater and a
+   * dark scene lets it fall away. Lit GLB rooms take it as scene ambient
+   * (one call, real shading); procedural rooms re-tint their unlit materials.
    */
   private fun applyAmbientColor(r: Float, g: Float, b: Float) {
     // Exponential smoothing keeps cuts from strobing the room. High enough
@@ -654,6 +679,14 @@ class JellyQuestActivity : AppSystemActivity() {
     appliedR = ambientR
     appliedG = ambientG
     appliedB = ambientB
+
+    if (litEnvironmentActive()) {
+      setSceneAmbient(
+          0.35f + 2.6f * ambientR,
+          0.35f + 2.6f * ambientG,
+          0.35f + 2.6f * ambientB,
+      )
+    }
 
     for ((entity, base, gain) in tintableEntities) {
       // A floor keeps the room from going pitch black; gain scales how hard
@@ -675,6 +708,9 @@ class JellyQuestActivity : AppSystemActivity() {
     ambientR = 0.5f
     ambientG = 0.5f
     ambientB = 0.5f
+    if (litEnvironmentActive()) {
+      setSceneAmbient(0.9f, 0.9f, 0.95f)
+    }
     for ((entity, base, _) in tintableEntities) {
       entity.setComponent(Material().apply {
         baseColor = base
