@@ -29,7 +29,7 @@ object TheaterDecor {
     private val AISLE_LIGHT = Color4(0.55f, 0.35f, 0.12f, 1f)   // warm amber
     private val WALL_PANEL = Color4(0.05f, 0.07f, 0.12f, 1f)    // deep blue
     private val CURTAIN = Color4(0.16f, 0.02f, 0.035f, 1f)      // deep red velvet
-    private val CEILING_STRIP = Color4(0.30f, 0.30f, 0.34f, 1f)
+    private val TUNGSTEN_CAN = Color4(0.48f, 0.34f, 0.19f, 1f)  // warm old-bulb glow
     private val STAGE = Color4(0.05f, 0.05f, 0.06f, 1f)
 
     /**
@@ -128,56 +128,14 @@ object TheaterDecor {
             rowIndex++
         }
 
-        // --- Acoustic wall panels along both side walls ---
-        val panelHeight = (room.ceilingHeight * 0.4f).coerceAtMost(6.5f)
-        val panelLateral = room.widthFront / 2f - 0.35f
-        var panelDist = frontSeat - 2f
-        while (panelDist <= backSeat + 2f) {
-            for (side in listOf(-1f, 1f)) {
-                pieces += DecorPiece(
-                    min = Vector3(-0.06f, 1.2f, -1.4f),
-                    max = Vector3(0.06f, 1.2f + panelHeight, 1.4f),
-                    color = WALL_PANEL,
-                    pose = poseAt(screen.distanceM - panelDist, lateral = side * panelLateral),
-                    gain = 1.1f,
-                )
-            }
-            panelDist += 6f
-        }
+        // (Acoustic wall panels are framed, fabric-textured meshes in the
+        // theater GLB now — see theater_imax.py build_baffles.)
 
-        // --- Ceiling light strips (react hard — they read as house lighting) ---
-        val stripLength = (backSeat - frontSeat) + 8f
-        val stripForward = screen.distanceM - (frontSeat + backSeat) / 2f
-        for (side in listOf(-1f, 1f)) {
-            pieces += DecorPiece(
-                min = Vector3(-0.25f, -0.08f, -stripLength / 2f),
-                max = Vector3(0.25f, 0f, stripLength / 2f),
-                color = CEILING_STRIP,
-                pose = poseAt(stripForward, lateral = side * room.widthFront / 4f, y = room.ceilingHeight - 0.15f),
-                gain = 2.2f,
-            )
-        }
+        // (Ceiling lights removed pending a proper reference — the tungsten
+        // can attempt didn't read as real fixtures.)
 
-        // --- Pleated curtains flanking the screen ---
-        for (side in listOf(-1f, 1f)) {
-            val baseLat = side * (screen.widthM / 2f + 0.9f)
-            val curtainH = screen.heightM + 1.2f
-            for (i in 0 until 7) {
-                val lat = baseLat + side * i * 0.22f
-                val fy = 0.55f + if (i % 2 == 0) 0.18f else 0.38f
-                pieces += DecorPiece(
-                    min = Vector3(-0.12f, 0f, -0.175f),
-                    max = Vector3(0.12f, curtainH, 0.175f),
-                    color = CURTAIN,
-                    pose = poseAt(
-                        screen.distanceM - fy,
-                        lateral = lat,
-                        y = (screen.screenBottomM - 0.3f).coerceAtLeast(0f),
-                    ),
-                    gain = 1.2f,
-                )
-            }
-        }
+        // (Screen-flanking curtains are AI-generated velvet in the theater
+        // GLB now — see theater_imax.py build_curtains.)
 
         // --- Stage apron under the screen ---
         pieces += DecorPiece(
