@@ -40,17 +40,21 @@ fun TheaterPickerContent(
     roomAcousticsEnabled: Boolean = true,
     onRoomAcousticsToggled: (Boolean) -> Unit = {},
 ) {
+    // Only fully built-out theaters are offered; unreleased presets stay
+    // defined in THEATER_EXPERIENCES until their environments are ready.
+    val theaters = remember { THEATER_EXPERIENCES.filter { it.released } }
+
     // Find which theater and seat are currently active based on screen dimensions
     var activeTheaterIndex by remember {
         mutableIntStateOf(
-            THEATER_EXPERIENCES.indexOfFirst {
+            theaters.indexOfFirst {
                 it.screenWidthM == currentScreen.widthM && it.screenHeightM == currentScreen.heightM
             }.coerceAtLeast(0)
         )
     }
     var activeSeatIndices by remember {
         mutableStateOf(
-            THEATER_EXPERIENCES.map { theater ->
+            theaters.map { theater ->
                 theater.seats.indexOfFirst { it.distanceM == currentScreen.distanceM }
                     .let { if (it >= 0) it else 1 }
             }
@@ -74,7 +78,7 @@ fun TheaterPickerContent(
             .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        THEATER_EXPERIENCES.forEachIndexed { theaterIdx, theater ->
+        theaters.forEachIndexed { theaterIdx, theater ->
             val isActive = theaterIdx == activeTheaterIndex
 
             Row(

@@ -18,6 +18,9 @@ data class TheaterExperience(
     val hybridProceduralRoom: Boolean = false,
     // Lateral shift of the GLB so the viewer lands in a seat, not the aisle.
     val environmentLateralOffsetM: Float = 0f,
+    // Only released theaters appear in the picker; the rest stay defined here
+    // until their environments are built out to the IMAX standard.
+    val released: Boolean = false,
 ) {
     val hasGlbEnvironment: Boolean get() = environmentAsset != null
 }
@@ -79,6 +82,7 @@ val THEATER_EXPERIENCES = listOf(
         environmentAsset = "cinema_imax.glb",
         environmentLit = true,
         hybridProceduralRoom = true,
+        released = true,
         seats = listOf(
             SeatPosition("Front", 19.5f, riserHeightM = 0.0f),
             SeatPosition("Middle", 28.0f, riserHeightM = 1.81f),

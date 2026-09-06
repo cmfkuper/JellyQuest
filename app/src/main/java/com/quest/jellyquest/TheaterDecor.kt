@@ -137,14 +137,17 @@ object TheaterDecor {
         // (Screen-flanking curtains are AI-generated velvet in the theater
         // GLB now — see theater_imax.py build_curtains.)
 
-        // --- Stage apron under the screen ---
-        pieces += DecorPiece(
-            min = Vector3(-screen.widthM * 0.46f, 0f, -0.55f),
-            max = Vector3(screen.widthM * 0.46f, (screen.screenBottomM - 0.05f).coerceAtLeast(0.2f), 0.55f),
-            color = STAGE,
-            pose = poseAt(screen.distanceM - 0.6f),
-            gain = 1.5f,
-        )
+        // --- Stage apron under the screen (procedural rooms only — in hybrid
+        // rooms the flat tinted box reads as a flickering bar under the screen)
+        if (includeSeating) {
+            pieces += DecorPiece(
+                min = Vector3(-screen.widthM * 0.46f, 0f, -0.55f),
+                max = Vector3(screen.widthM * 0.46f, (screen.screenBottomM - 0.05f).coerceAtLeast(0.2f), 0.55f),
+                color = STAGE,
+                pose = poseAt(screen.distanceM - 0.6f),
+                gain = 1.5f,
+            )
+        }
 
         return pieces
     }

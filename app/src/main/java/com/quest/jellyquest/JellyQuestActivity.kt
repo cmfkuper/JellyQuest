@@ -103,6 +103,7 @@ class JellyQuestActivity : AppSystemActivity() {
   private var wallEntities: List<Entity> = emptyList()
   private var armrestEntities: List<Entity> = emptyList()
   private var environmentModelEntity: Entity? = null
+  private var decorEntities: List<Entity> = emptyList()
 
   // Jellyfin + ExoPlayer
   lateinit var exoPlayerSource: ExoPlayerSource
@@ -233,6 +234,11 @@ class JellyQuestActivity : AppSystemActivity() {
     exoPlayerSource.disconnect()
     exoPlayerSource.release()
     super.onDestroy()
+    // Fully exit instead of lingering as a cached process: a cached VR process
+    // keeps its GPU allocations (environment textures, panel swapchains)
+    // resident for many minutes, and relaunching alongside that cached copy
+    // doubled the footprint — the kernel OOM-killed the fresh boot.
+    android.os.Process.killProcess(android.os.Process.myPid())
   }
 
   override fun onSceneReady() {
@@ -257,7 +263,6 @@ class JellyQuestActivity : AppSystemActivity() {
     } else {
       spawnEnvironment()
       spawnScreen()
-      startBumpers()
       // Auto-open browse panel if library cache is available
       if (jellyfinClient.cachedLibraries.value != null) {
         browsePanelVisible.value = true
@@ -318,20 +323,11 @@ class JellyQuestActivity : AppSystemActivity() {
   fun spawnScreenFromSystem() {
     spawnEnvironment()
     spawnScreen()
-    startBumpers()
     // Auto-open browse panel if library cache is available
     if (jellyfinClient.cachedLibraries.value != null) {
       browsePanelVisible.value = true
       spawnBrowsePanel()
     }
-  }
-
-  private fun startBumpers() {
-    exoPlayerSource.playBumpers(this, listOf(
-        R.raw.bumper_regal,
-        R.raw.bumper_chilly_dilly,
-        R.raw.bumper_snipe,
-    ))
   }
 
   private fun spawnScreen() {
@@ -498,6 +494,8 @@ class JellyQuestActivity : AppSystemActivity() {
     wallEntities = emptyList()
     armrestEntities.forEach { it.destroy() }
     armrestEntities = emptyList()
+    decorEntities.forEach { it.destroy() }
+    decorEntities = emptyList()
     environmentModelEntity?.destroy()
     environmentModelEntity = null
     tintableEntities.clear()
@@ -543,10 +541,12 @@ class JellyQuestActivity : AppSystemActivity() {
       if (experience.environmentLit) {
         setSceneAmbient(0.9f, 0.9f, 0.95f)
       }
-      // Hybrid rooms: procedural (tintable) shell + fixtures around the GLB
-      // seats — everything the dimmer and light sim should own.
+      // Hybrid rooms: procedural (tintable) shell around the GLB furnishings.
+      // No procedural decor — the GLB carries its own step lights and stage,
+      // and the decor's center-aisle lights landed in the middle of the GLB's
+      // seating (and lingered as duplicates after every recenter respawn).
       if (experience.hybridProceduralRoom) {
-        spawnProceduralEnvironment(a, envPos, screen, room, includeDecor = true, decorSeating = false)
+        spawnProceduralEnvironment(a, envPos, screen, room, includeDecor = false, decorSeating = false)
       }
       Log.i(TAG, "GLB environment loaded: $asset pos=${glbPose.t} rot=${glbPose.q}")
       Log.i(TAG, "  Anchor pos=${a.position} fwd=${a.forward}")
@@ -663,7 +663,7 @@ class JellyQuestActivity : AppSystemActivity() {
     if (!includeDecor) return
     val seatDistances = currentExperience()?.seats?.map { it.distanceM }
         ?: listOf(screen.distanceM)
-    for (piece in TheaterDecor.build(a, screen, room, seatDistances, includeSeating = decorSeating)) {
+    decorEntities = TheaterDecor.build(a, screen, room, seatDistances, includeSeating = decorSeating).map { piece ->
       // Only fixtures and the stage join the live light sim — re-tinting every
       // seat row every tick overwhelmed the renderer and froze the headset.
       createBoxEntity(

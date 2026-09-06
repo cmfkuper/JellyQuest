@@ -160,6 +160,75 @@ def add_box(name, size, location, material, rotation=(0, 0, 0), bevel=0.0):
     return obj
 
 
+# The 2048 concrete sheet covers CONCRETE_TILE_M meters and wraps (REPEAT).
+# At 4.5m that is ~455 px/m — crisp underfoot. One sheet over the whole 45m
+# room was ~45 px/m: DOOM-era texel soup at the viewer's feet.
+CONCRETE_TILE_M = 4.5
+
+
+def concrete_mottle(x, y):
+    """Smooth deterministic large-scale brightness variation (world XY, meters).
+    Painted into vertex colors so the tiled sheet never reads as repeating —
+    each area of the room gets its own tone even though the detail wraps."""
+    v = (math.sin(x * 0.55 + 1.3) * math.sin(y * 0.38 + 0.7)
+         + 0.6 * math.sin(x * 0.21 - y * 0.33 + 2.0)
+         + 0.4 * math.sin(x * 0.92 + y * 0.61 + 5.0)) / 2.0
+    return max(0.84, min(1.08, 0.96 + 0.10 * v))
+
+
+def apply_world_concrete_uvs(obj):
+    """Project UVs from WORLD position (dominant-axis planar, isotropic,
+    1/CONCRETE_TILE_M) so every concrete surface samples the same wrapping
+    sheet at the same density — tier tops continue the slab with no stretch.
+    Without this, a box's default UVs squeeze the entire texture into each
+    face — a 30m x 1.15m tier top becomes a 26:1 stretch of stripes.
+    Also writes the large-scale mottle into a corner color attribute."""
+    bpy.context.view_layer.update()
+    mesh = obj.data
+    mw = obj.matrix_world
+    if not mesh.uv_layers:
+        mesh.uv_layers.new()
+    uv = mesh.uv_layers.active.data
+    s = 1.0 / CONCRETE_TILE_M
+    for poly in mesh.polygons:
+        n = poly.normal  # local == world here (boxes are axis-aligned)
+        ax = max(range(3), key=lambda i: abs(n[i]))
+        for li in poly.loop_indices:
+            co = mw @ mesh.vertices[mesh.loops[li].vertex_index].co
+            if ax == 2:
+                u, v = co.x, co.y
+            elif ax == 1:
+                u, v = co.x, co.z
+            else:
+                u, v = co.y, co.z
+            uv[li].uv = (u * s, v * s)
+    attr = mesh.color_attributes.new(name="Col", type="FLOAT_COLOR", domain="CORNER")
+    for poly in mesh.polygons:
+        for li in poly.loop_indices:
+            co = mw @ mesh.vertices[mesh.loops[li].vertex_index].co
+            g = concrete_mottle(co.x, co.y)
+            attr.data[li].color = (g, g, g, 1.0)
+
+
+def make_seamless(img, name):
+    """Blend the borders of an image against its half-offset copy so it wraps
+    without visible seams (the rolled copy is continuous across the original's
+    edges; crossfade to it over a 15% feather band, keep the original center)."""
+    import numpy as np
+    w, h = img.size
+    px = np.array(img.pixels[:], dtype=np.float32).reshape(h, w, 4)
+    rolled = np.roll(px, (h // 2, w // 2), axis=(0, 1))
+    yy, xx = np.mgrid[0:h, 0:w]
+    fx = np.clip(np.minimum(xx, w - 1 - xx) / (w * 0.15), 0, 1)
+    fy = np.clip(np.minimum(yy, h - 1 - yy) / (h * 0.15), 0, 1)
+    m = np.minimum(fx, fy)[..., None]
+    out = px * m + rolled * (1 - m)
+    result = bpy.data.images.new(name, w, h)
+    result.pixels[:] = out.ravel()
+    result.pack()
+    return result
+
+
 def add_plane(name, verts, material):
     mesh = bpy.data.meshes.new(name)
     mesh.from_pydata(verts, [], [list(range(len(verts)))])
@@ -474,90 +543,59 @@ def build_baffles():
 
 
 def build_concrete_floor():
-    """Poured-concrete floor: the reference texture sampled at two scales and
-    rotations, blended through noise, BAKED into one continuous 2048px sheet
-    over the whole footprint — no visible tiling, subtle aberration like a
-    real slab. Returns the concrete material so the tiers can wear it too."""
-    tex_path = os.path.join(_REF, "reference", "floor_tex.png")
+    """Poured-concrete floor: one unique 2048px AI-generated sheet (Higgsfield
+    GPT Image 2, styled on Chris's reference crops) mapped ONCE across the
+    whole footprint — repetition is impossible because no pixel appears twice.
+    A fine procedural grain multiply adds close-up aggregate detail, then the
+    result is BAKED into a continuous 2048 sheet. NEVER source this from a
+    reference-sheet crop: the old 400px floor_tex.png had caption text baked
+    in, which showed up as ghost words on the theater floor.
+    Returns the concrete material so the tiers can wear it too."""
+    tex_path = os.path.join(_REF, "reference", "concrete_floor_2k.png")
     if not os.path.exists(tex_path):
         return None
     img = bpy.data.images.load(tex_path)
-    img.pack()
+    seamless = make_seamless(img, "concrete_seamless")
 
-    # The floor slab (gets the baked result); Tier prefix keeps it in export.
-    verts = [(-15.5, -1.0, 0.02), (15.5, -1.0, 0.02), (15.5, 44.0, 0.02), (-15.5, 44.0, 0.02)]
+    # The floor slab: a ~2m grid (not one quad) so the vertex-color mottle can
+    # vary across the room. Tier prefix keeps it in export.
+    xs = [(-15.5 + i * 31.0 / 16) for i in range(17)]
+    ys = [(-1.0 + j * 45.0 / 22) for j in range(23)]
+    verts = [(x, y, 0.02) for j, y in enumerate(ys) for x in xs]
+    faces = []
+    for j in range(22):
+        for i in range(16):
+            a = j * 17 + i
+            faces.append([a, a + 1, a + 18, a + 17])
     mesh = bpy.data.meshes.new("TierFloorMesh")
-    mesh.from_pydata(verts, [], [[0, 1, 2, 3]])
+    mesh.from_pydata(verts, [], faces)
     mesh.update()
-    uv = mesh.uv_layers.new()
-    for i, c in enumerate([(0, 0), (1, 0), (1, 1), (0, 1)]):
-        uv.data[i].uv = c
     obj = bpy.data.objects.new("TierFloor", mesh)
     bpy.context.collection.objects.link(obj)
+    # World-mapped isotropic tiling UVs + mottle vertex colors; the tiers use
+    # the same projection so their tops continue this slab seamlessly.
+    apply_world_concrete_uvs(obj)
 
-    # Bake-source material: two samples blended by noise, mottled brightness
-    src = bpy.data.materials.new("ConcreteBakeSrc")
-    src.use_nodes = True
-    n = src.node_tree.nodes
-    l = src.node_tree.links
-    bsdf = n["Principled BSDF"]
-    coord = n.new("ShaderNodeTexCoord")
-    map1 = n.new("ShaderNodeMapping")
-    map1.inputs["Scale"].default_value = (5.0, 7.0, 1.0)
-    map2 = n.new("ShaderNodeMapping")
-    map2.inputs["Scale"].default_value = (8.0, 11.0, 1.0)
-    map2.inputs["Rotation"].default_value = (0, 0, math.radians(37))
-    t1 = n.new("ShaderNodeTexImage"); t1.image = img
-    t2 = n.new("ShaderNodeTexImage"); t2.image = img
-    noise = n.new("ShaderNodeTexNoise")
-    noise.inputs["Scale"].default_value = 3.0
-    mix = n.new("ShaderNodeMix"); mix.data_type = "RGBA"
-    l.new(coord.outputs["UV"], map1.inputs["Vector"])
-    l.new(coord.outputs["UV"], map2.inputs["Vector"])
-    l.new(map1.outputs["Vector"], t1.inputs["Vector"])
-    l.new(map2.outputs["Vector"], t2.inputs["Vector"])
-    l.new(noise.outputs["Fac"], mix.inputs["Factor"])
-    l.new(t1.outputs["Color"], mix.inputs[6])
-    l.new(t2.outputs["Color"], mix.inputs[7])
-    # Large-scale mottle for slab-like unevenness
-    mottle = n.new("ShaderNodeTexNoise")
-    mottle.inputs["Scale"].default_value = 0.8
-    ramp = n.new("ShaderNodeValToRGB")
-    ramp.color_ramp.elements[0].color = (0.82, 0.82, 0.82, 1)
-    ramp.color_ramp.elements[1].color = (1.05, 1.05, 1.05, 1)
-    mult = n.new("ShaderNodeMix"); mult.data_type = "RGBA"; mult.blend_type = "MULTIPLY"
-    set_input(mult, ["Factor", "Fac"], 1.0)
-    l.new(mottle.outputs["Fac"], ramp.inputs["Fac"])
-    l.new(mix.outputs[2], mult.inputs[6])
-    l.new(ramp.outputs["Color"], mult.inputs[7])
-    l.new(mult.outputs[2], bsdf.inputs["Base Color"])
-    obj.data.materials.append(src)
-
-    # Bake to one continuous sheet
-    baked = bpy.data.images.new("concrete_baked", 2048, 2048)
-    bake_node = n.new("ShaderNodeTexImage")
-    bake_node.image = baked
-    n.active = bake_node
-    scene = bpy.context.scene
-    scene.render.engine = "CYCLES"
-    scene.cycles.samples = 16
-    bpy.ops.object.select_all(action="DESELECT")
-    obj.select_set(True)
-    bpy.context.view_layer.objects.active = obj
-    bpy.ops.object.bake(type="DIFFUSE", pass_filter={"COLOR"}, use_selected_to_active=False)
-    baked.pack()
-
-    # Final material: the baked sheet + the reference's semi-polished response
+    # Material: seamless sheet tiled at CONCRETE_TILE_M x vertex mottle.
+    # Exported as texture + COLOR_0 (glTF multiplies them) — no bake.
     concrete = bpy.data.materials.new("Concrete")
     concrete.use_nodes = True
     cn = concrete.node_tree.nodes
     cl = concrete.node_tree.links
     cbsdf = cn["Principled BSDF"]
-    set_input(cbsdf, "Roughness", 0.35)
+    # Semi-polished: low enough that the screen's light streaks across the
+    # slab (Chris wants the floor to visibly catch the screen glow).
+    set_input(cbsdf, "Roughness", 0.30)
     ct = cn.new("ShaderNodeTexImage")
-    ct.image = baked
-    cl.new(ct.outputs["Color"], cbsdf.inputs["Base Color"])
-    obj.data.materials.clear()
+    ct.image = seamless
+    ct.extension = "REPEAT"
+    vcol = cn.new("ShaderNodeVertexColor")
+    vcol.layer_name = "Col"
+    mult = cn.new("ShaderNodeMix"); mult.data_type = "RGBA"; mult.blend_type = "MULTIPLY"
+    set_input(mult, ["Factor", "Fac"], 1.0)
+    cl.new(ct.outputs["Color"], mult.inputs[6])
+    cl.new(vcol.outputs["Color"], mult.inputs[7])
+    cl.new(mult.outputs[2], cbsdf.inputs["Base Color"])
     obj.data.materials.append(concrete)
     return concrete
 
@@ -877,8 +915,10 @@ def build():
         template = detailed if abs(d - CAMERA_ROW) <= DETAIL_RADIUS else simple
 
         # Tier platform (a step per row) + aisle step lights every other row
-        add_box(f"Tier{row_count}", (2 * half_row + 2.5, ROW_PITCH, max(rise, 0.04)),
+        tier_obj = add_box(f"Tier{row_count}", (2 * half_row + 2.5, ROW_PITCH, max(rise, 0.04)),
                 (0, d, max(rise, 0.04) / 2), tier_mat)
+        if concrete_mat:
+            apply_world_concrete_uvs(tier_obj)
         if row_count % 2 == 0:
             for ax in AISLE_CENTERS:
                 add_box(f"Step{row_count}_{ax}", (1.0, 0.1, 0.035),

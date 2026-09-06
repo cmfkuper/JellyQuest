@@ -17,8 +17,11 @@ data class ScreenConfig(
     val screenCenterY: Float get() = screenBottomM + (heightM / 2f)
 }
 
-/** Default theater preset and seat, used at startup before user selects. */
-private val DEFAULT_EXPERIENCE = THEATER_EXPERIENCES.first { it.name == "Multiplex" }
+/**
+ * Startup theater: the flagship IMAX environment, middle seat. This is the
+ * first thing a new user sees, so it must be the finished room.
+ */
+private val DEFAULT_EXPERIENCE = THEATER_EXPERIENCES.first { it.name == "IMAX" }
 private val DEFAULT_SEAT = DEFAULT_EXPERIENCE.seats.first { it.label == "Middle" }
 
 val DEFAULT_SCREEN = ScreenConfig(
