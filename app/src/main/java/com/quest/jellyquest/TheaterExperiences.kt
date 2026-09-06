@@ -12,6 +12,10 @@ data class TheaterExperience(
     // Lit environments shade from the scene's ambient light (driven live by
     // the screen's sampled color); unlit ones use baked lighting.
     val environmentLit: Boolean = false,
+    // Hybrid rooms: the GLB carries only furnishings (rendered unlit so its
+    // textures work), while walls/floor/ceiling spawn procedurally and join
+    // the per-surface ambient tint system.
+    val hybridProceduralRoom: Boolean = false,
     // Lateral shift of the GLB so the viewer lands in a seat, not the aisle.
     val environmentLateralOffsetM: Float = 0f,
 ) {
@@ -74,6 +78,7 @@ val THEATER_EXPERIENCES = listOf(
         ceilingHeightM = 18.0f,
         environmentAsset = "cinema_imax.glb",
         environmentLit = true,
+        hybridProceduralRoom = true,
         seats = listOf(
             SeatPosition("Front", 19.5f, riserHeightM = 0.0f),
             SeatPosition("Middle", 28.0f, riserHeightM = 1.81f),

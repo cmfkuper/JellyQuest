@@ -57,9 +57,14 @@ fun PlaybackControlsPanel(
     onSeekTo: (Long) -> Unit,
     onHide: () -> Unit,
     onButtonHover: () -> Unit = {},
+    roomDimmer: Float = 1f,
+    onDimmerChange: (Float) -> Unit = {},
 ) {
     CompositionLocalProvider(LocalButtonHover provides onButtonHover) {
-        PlaybackControlsContent(exoPlayerSource, onPlayPause, onStop, onSeekTo, onHide)
+        PlaybackControlsContent(
+            exoPlayerSource, onPlayPause, onStop, onSeekTo, onHide,
+            roomDimmer, onDimmerChange,
+        )
     }
 }
 
@@ -73,6 +78,8 @@ private fun PlaybackControlsContent(
     onStop: () -> Unit,
     onSeekTo: (Long) -> Unit,
     onHide: () -> Unit,
+    roomDimmer: Float,
+    onDimmerChange: (Float) -> Unit,
 ) {
     val mediaInfo by exoPlayerSource.mediaInfo.collectAsState()
     val audioTracks by exoPlayerSource.audioTracks.collectAsState()
@@ -220,6 +227,37 @@ private fun PlaybackControlsContent(
             }
 
             Spacer(modifier = Modifier.size(6.dp))
+
+            // Room lights dimmer: scales the theater's ambient lighting.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "Room lights",
+                    style = SpatialTheme.typography.body2.copy(color = DraculaForeground),
+                )
+                Spacer(modifier = Modifier.size(12.dp))
+                Slider(
+                    value = roomDimmer,
+                    onValueChange = onDimmerChange,
+                    colors = SliderDefaults.colors(
+                        thumbColor = DraculaYellow,
+                        activeTrackColor = DraculaYellow,
+                        inactiveTrackColor = DraculaCurrentLine,
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(26.dp),
+                )
+                Spacer(modifier = Modifier.size(12.dp))
+                Text(
+                    text = "${(roomDimmer * 100).toInt()}%",
+                    style = SpatialTheme.typography.body2.copy(color = DraculaYellow),
+                )
+            }
+
+            Spacer(modifier = Modifier.size(4.dp))
 
             // Controller binding legend — the bindings existed before this HUD,
             // but nothing in VR told the user about them.

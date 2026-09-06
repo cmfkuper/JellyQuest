@@ -139,6 +139,20 @@ class JellyQuestActivity : AppSystemActivity() {
   private var appliedB = -1f
   private var lastTintApplyMs = 0L
 
+  // User-controlled room light level (0..1), on the playback HUD. Scales the
+  // whole ambient system: baseline glow and screen-driven reaction alike.
+  val roomDimmer = mutableStateOf(1.0f)
+
+  fun setRoomDimmer(value: Float) {
+    roomDimmer.value = value.coerceIn(0f, 1f)
+    getSharedPreferences("display_settings", MODE_PRIVATE)
+        .edit().putFloat("room_dimmer", roomDimmer.value).apply()
+    // Bypass the throttle/delta gates so the slider feels live.
+    appliedR = -1f
+    lastTintApplyMs = 0L
+    applyAmbientColor(ambientR, ambientG, ambientB)
+  }
+
   override fun registerFeatures(): List<SpatialFeature> {
     val features =
         mutableListOf<SpatialFeature>(
@@ -165,6 +179,9 @@ class JellyQuestActivity : AppSystemActivity() {
         scope = activityScope,
     )
     Log.i(TAG, "ExoPlayer, Jellyfin client, and playback reporter initialized")
+
+    roomDimmer.value =
+        getSharedPreferences("display_settings", MODE_PRIVATE).getFloat("room_dimmer", 1.0f)
 
     // Audio settings
     audioSettings = AudioSettings(getSharedPreferences("audio_settings", MODE_PRIVATE))
@@ -526,6 +543,11 @@ class JellyQuestActivity : AppSystemActivity() {
       if (experience.environmentLit) {
         setSceneAmbient(0.9f, 0.9f, 0.95f)
       }
+      // Hybrid rooms: procedural (tintable) shell + fixtures around the GLB
+      // seats — everything the dimmer and light sim should own.
+      if (experience.hybridProceduralRoom) {
+        spawnProceduralEnvironment(a, envPos, screen, room, includeDecor = true, decorSeating = false)
+      }
       Log.i(TAG, "GLB environment loaded: $asset pos=${glbPose.t} rot=${glbPose.q}")
       Log.i(TAG, "  Anchor pos=${a.position} fwd=${a.forward}")
       Log.i(TAG, "  Model origin at screen wall, extends -Z toward viewer (30m deep)")
@@ -533,7 +555,7 @@ class JellyQuestActivity : AppSystemActivity() {
     } else {
       // Procedural box environment — flat-colored walls, floor, and ceiling
       setSceneAmbient(8.0f, 8.0f, 8.0f)  // restore the unlit-content baseline
-      spawnProceduralEnvironment(a, envPos, screen, room)
+      spawnProceduralEnvironment(a, envPos, screen, room, includeDecor = true, decorSeating = true)
     }
 
     // Armrests: only for procedural environments (GLB model has its own)
@@ -550,7 +572,14 @@ class JellyQuestActivity : AppSystemActivity() {
     }
   }
 
-  private fun spawnProceduralEnvironment(a: Anchor, envPos: Vector3, screen: ScreenConfig, room: RoomGeometry) {
+  private fun spawnProceduralEnvironment(
+      a: Anchor,
+      envPos: Vector3,
+      screen: ScreenConfig,
+      room: RoomGeometry,
+      includeDecor: Boolean,
+      decorSeating: Boolean,
+  ) {
     // Floor: dark charcoal ground plane centered on the user
     val floorHalfW = room.widthBack / 2f
     val floorHalfD = room.depth / 2f
@@ -630,9 +659,11 @@ class JellyQuestActivity : AppSystemActivity() {
 
     // Theater furnishings: stadium seating, aisle lights, wall panels,
     // ceiling strips, stage apron — every piece joins the ambient light sim.
+    // Skipped for hybrid rooms, whose GLB carries the furnishings.
+    if (!includeDecor) return
     val seatDistances = currentExperience()?.seats?.map { it.distanceM }
         ?: listOf(screen.distanceM)
-    for (piece in TheaterDecor.build(a, screen, room, seatDistances)) {
+    for (piece in TheaterDecor.build(a, screen, room, seatDistances, includeSeating = decorSeating)) {
       // Only fixtures and the stage join the live light sim — re-tinting every
       // seat row every tick overwhelmed the renderer and froze the headset.
       createBoxEntity(
@@ -700,22 +731,23 @@ class JellyQuestActivity : AppSystemActivity() {
     appliedG = ambientG
     appliedB = ambientB
 
+    val dim = roomDimmer.value
     if (litEnvironmentActive()) {
       setSceneAmbient(
-          0.35f + 2.6f * ambientR,
-          0.35f + 2.6f * ambientG,
-          0.35f + 2.6f * ambientB,
+          dim * (0.35f + 2.6f * ambientR),
+          dim * (0.35f + 2.6f * ambientG),
+          dim * (0.35f + 2.6f * ambientB),
       )
     }
 
     for ((entity, base, gain) in tintableEntities) {
-      // A floor keeps the room from going pitch black; gain scales how hard
-      // this particular surface reacts to the screen.
+      // The dimmer scales the whole response; gain scales how hard this
+      // particular surface reacts to the screen.
       entity.setComponent(Material().apply {
         baseColor = Color4(
-            (base.red * (0.35f + 2.2f * gain * ambientR)).coerceAtMost(1f),
-            (base.green * (0.35f + 2.2f * gain * ambientG)).coerceAtMost(1f),
-            (base.blue * (0.35f + 2.2f * gain * ambientB)).coerceAtMost(1f),
+            (base.red * dim * (0.35f + 2.2f * gain * ambientR)).coerceAtMost(1f),
+            (base.green * dim * (0.35f + 2.2f * gain * ambientG)).coerceAtMost(1f),
+            (base.blue * dim * (0.35f + 2.2f * gain * ambientB)).coerceAtMost(1f),
             base.alpha,
         )
         unlit = true
@@ -728,12 +760,18 @@ class JellyQuestActivity : AppSystemActivity() {
     ambientR = 0.5f
     ambientG = 0.5f
     ambientB = 0.5f
+    val dim = roomDimmer.value
     if (litEnvironmentActive()) {
-      setSceneAmbient(0.9f, 0.9f, 0.95f)
+      setSceneAmbient(dim * 0.9f, dim * 0.9f, dim * 0.95f)
     }
     for ((entity, base, _) in tintableEntities) {
       entity.setComponent(Material().apply {
-        baseColor = base
+        baseColor = Color4(
+            base.red * (0.25f + 0.75f * dim),
+            base.green * (0.25f + 0.75f * dim),
+            base.blue * (0.25f + 0.75f * dim),
+            base.alpha,
+        )
         unlit = true
       })
     }
@@ -972,13 +1010,15 @@ class JellyQuestActivity : AppSystemActivity() {
                       onSeekTo = { positionMs -> handleSeekTo(positionMs) },
                       onHide = { dismissControlsPanel() },
                       onButtonHover = { hapticPulse(0.18f, 8) },
+                      roomDimmer = roomDimmer.value,
+                      onDimmerChange = { setRoomDimmer(it) },
                   )
                 }
               }
             },
             settingsCreator = {
               UIPanelSettings(
-                  shape = QuadShapeOptions(width = 0.7f, height = 0.33f),
+                  shape = QuadShapeOptions(width = 0.7f, height = 0.38f),
                   style = PanelStyleOptions(themeResourceId = R.style.PanelAppThemeTransparent),
                   display = DpPerMeterDisplayOptions(dpPerMeter = 800f),
                   input = PanelInputOptions(

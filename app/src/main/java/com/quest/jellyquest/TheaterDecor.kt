@@ -28,6 +28,7 @@ object TheaterDecor {
     private val TIER = Color4(0.09f, 0.09f, 0.10f, 1f)
     private val AISLE_LIGHT = Color4(0.55f, 0.35f, 0.12f, 1f)   // warm amber
     private val WALL_PANEL = Color4(0.05f, 0.07f, 0.12f, 1f)    // deep blue
+    private val CURTAIN = Color4(0.16f, 0.02f, 0.035f, 1f)      // deep red velvet
     private val CEILING_STRIP = Color4(0.30f, 0.30f, 0.34f, 1f)
     private val STAGE = Color4(0.05f, 0.05f, 0.06f, 1f)
 
@@ -36,11 +37,16 @@ object TheaterDecor {
      * (defines where seating starts/ends); the viewer sits at
      * [screen].distanceM and their row is left empty.
      */
+    /**
+     * [includeSeating] gates the tiers/benches/backrests — hybrid rooms get
+     * those from a textured GLB and only want the light-reactive fixtures.
+     */
     fun build(
         anchor: Anchor,
         screen: ScreenConfig,
         room: RoomGeometry,
         seatDistances: List<Float>,
+        includeSeating: Boolean = true,
     ): List<DecorPiece> {
         if (seatDistances.isEmpty()) return emptyList()
         val pieces = mutableListOf<DecorPiece>()
@@ -71,13 +77,15 @@ object TheaterDecor {
             val rowGain = 1.3f - 0.8f * ((rowDist - frontSeat) / seatSpan)
 
             // Tier platform (full width, floor to this row's height).
-            pieces += DecorPiece(
-                min = Vector3(-rowWidth / 2f, 0f, -ROW_DEPTH / 2f),
-                max = Vector3(rowWidth / 2f, tierY + 0.04f, ROW_DEPTH / 2f),
-                color = TIER,
-                pose = poseAt(forwardOffset),
-                gain = rowGain * 0.8f,
-            )
+            if (includeSeating) {
+                pieces += DecorPiece(
+                    min = Vector3(-rowWidth / 2f, 0f, -ROW_DEPTH / 2f),
+                    max = Vector3(rowWidth / 2f, tierY + 0.04f, ROW_DEPTH / 2f),
+                    color = TIER,
+                    pose = poseAt(forwardOffset),
+                    gain = rowGain * 0.8f,
+                )
+            }
 
             // Aisle step lights on the tier's screen-side edge (every other row
             // — enough to read as a lit aisle at a fraction of the entities).
@@ -95,7 +103,7 @@ object TheaterDecor {
 
             // Leave the viewer's own row empty so they aren't inside a seat.
             val isViewerRow = kotlin.math.abs(rowDist - screen.distanceM) < ROW_DEPTH * 0.6f
-            if (!isViewerRow) {
+            if (includeSeating && !isViewerRow) {
                 for (side in listOf(-1f, 1f)) {
                     val lateral = side * sectionCenter
                     // Local +Z faces the screen: cushion forward, backrest on
@@ -148,6 +156,27 @@ object TheaterDecor {
                 pose = poseAt(stripForward, lateral = side * room.widthFront / 4f, y = room.ceilingHeight - 0.15f),
                 gain = 2.2f,
             )
+        }
+
+        // --- Pleated curtains flanking the screen ---
+        for (side in listOf(-1f, 1f)) {
+            val baseLat = side * (screen.widthM / 2f + 0.9f)
+            val curtainH = screen.heightM + 1.2f
+            for (i in 0 until 7) {
+                val lat = baseLat + side * i * 0.22f
+                val fy = 0.55f + if (i % 2 == 0) 0.18f else 0.38f
+                pieces += DecorPiece(
+                    min = Vector3(-0.12f, 0f, -0.175f),
+                    max = Vector3(0.12f, curtainH, 0.175f),
+                    color = CURTAIN,
+                    pose = poseAt(
+                        screen.distanceM - fy,
+                        lateral = lat,
+                        y = (screen.screenBottomM - 0.3f).coerceAtLeast(0f),
+                    ),
+                    gain = 1.2f,
+                )
+            }
         }
 
         // --- Stage apron under the screen ---

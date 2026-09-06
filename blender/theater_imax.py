@@ -50,15 +50,15 @@ AISLE_HALF = 0.65
 CAMERA_ROW = 28.0     # "Middle" seat
 DETAIL_RADIUS = 2.5   # rows within this of the camera get the high-LOD seat
 
-# AI-generated hero seat (Higgsfield multi-image-to-3D from the reference
-# sheet). Normalized and decimated into two LODs; procedural seats remain the
-# fallback if the file is missing.
-AI_SEAT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seat_ai.glb")
+# AI-generated hero seats (Higgsfield multi-image-to-3D from the reference
+# sheet), generated NATIVELY at each LOD's polycount with should_remesh —
+# no local decimation or texture re-baking, which only ever butchered them.
+_REF = os.path.dirname(os.path.abspath(__file__))
+AI_SEAT_NEAR_PATH = os.path.join(_REF, "seat_ai_near.glb")  # ~5k tris
+AI_SEAT_FAR_PATH = os.path.join(_REF, "seat_ai_far.glb")    # ~1.2k tris
 # Real cinema-seat envelope; the AI model is normalized per-axis to this,
 # because its native proportions are much chunkier than a real chair.
 AI_SEAT_DIMS = (0.72, 0.80, 1.05)  # width, depth, height in meters
-AI_SEAT_LOD_NEAR = 0.18   # ~5.4k tris — rows adjacent to the viewer
-AI_SEAT_LOD_FAR = 0.06    # ~1.8k tris — everything else
 SEAT_ARC_PITCH = 0.70     # spacing tuned to the normalized width (shared-arm look)
 
 # The app's three seat positions — each gets an empty spot at the aisle center
@@ -208,11 +208,12 @@ def build_seat_template(name, mats, detailed):
     return seat
 
 
-def load_ai_seat_template(name, decimate_ratio):
-    """Import the AI seat GLB, normalize (origin at floor center, real-world
-    height, facing -y as authored), and decimate to the requested LOD."""
+def load_ai_seat_template(name, glb_path):
+    """Import an AI seat GLB and normalize it: origin at floor center,
+    per-axis real-world seat dimensions, facing -y as authored. The mesh and
+    its UVs/textures pass through untouched."""
     before = set(bpy.data.objects)
-    bpy.ops.import_scene.gltf(filepath=AI_SEAT_PATH)
+    bpy.ops.import_scene.gltf(filepath=glb_path)
     imported = [o for o in bpy.data.objects if o not in before]
     meshes = [o for o in imported if o.type == "MESH"]
     for o in imported:
@@ -240,19 +241,77 @@ def load_ai_seat_template(name, decimate_ratio):
         AI_SEAT_DIMS[2] / (max(zs) - min(zs)),
     )
     bpy.ops.object.transform_apply(scale=True)
+    tris = sum(len(p.vertices) - 2 for p in obj.data.polygons)
+    print(f"AI seat '{name}': native tris={tris} dims normalized to {AI_SEAT_DIMS}")
+    return obj
 
-    mod = obj.modifiers.new("Decimate", "DECIMATE")
+
+def bake_seat_lod(source, name, decimate_ratio, tex_size=1024):
+    """Decimated LOD with CLEAN UVs and the original texture re-baked onto
+    them. Decimation shreds the AI mesh's UV atlas, so sampling the original
+    texture through surviving UVs renders as torn confetti — instead the LOD
+    gets a fresh Smart-UV layout and a Cycles selected-to-active diffuse bake
+    from the pristine source mesh."""
+    lod = source.copy()
+    lod.data = source.data.copy()
+    lod.name = name
+    bpy.context.collection.objects.link(lod)
+    bpy.ops.object.select_all(action="DESELECT")
+    lod.select_set(True)
+    bpy.context.view_layer.objects.active = lod
+
+    mod = lod.modifiers.new("Decimate", "DECIMATE")
     mod.ratio = decimate_ratio
     bpy.ops.object.modifier_apply(modifier=mod.name)
-    # Re-smooth after decimation — collapsed triangles otherwise render as
-    # sharp slashes across the upholstery.
-    try:
-        bpy.ops.object.shade_auto_smooth(angle=math.radians(50))
-    except Exception:
-        bpy.ops.object.shade_smooth()
-    tris = sum(len(p.vertices) - 2 for p in obj.data.polygons)
-    print(f"AI seat '{name}': ratio={decimate_ratio} tris={tris}")
-    return obj
+    bpy.ops.object.shade_smooth()
+
+    # Fresh UVs for the low-poly mesh
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.ops.mesh.select_all(action="SELECT")
+    bpy.ops.uv.smart_project(angle_limit=math.radians(66), island_margin=0.003)
+    bpy.ops.object.mode_set(mode="OBJECT")
+
+    # Bake target image + material. Fill with the fabric's average red so any
+    # missed ray or seam bleeds red, not black slashes.
+    img = bpy.data.images.new(f"{name}_bake", tex_size, tex_size)
+    img.generated_color = (0.30, 0.05, 0.05, 1.0)
+    img.source = "GENERATED"
+    mat = bpy.data.materials.new(f"{name}_mat")
+    mat.use_nodes = True
+    nodes = mat.node_tree.nodes
+    tex_node = nodes.new("ShaderNodeTexImage")
+    tex_node.image = img
+    nodes.active = tex_node
+    mat.node_tree.links.new(
+        tex_node.outputs["Color"],
+        nodes["Principled BSDF"].inputs["Base Color"],
+    )
+    lod.data.materials.clear()
+    lod.data.materials.append(mat)
+
+    # Selected-to-active bake: source (with its intact atlas) -> LOD image
+    scene = bpy.context.scene
+    scene.render.engine = "CYCLES"
+    scene.cycles.samples = 16
+    source.select_set(True)
+    bpy.context.view_layer.objects.active = lod
+    bpy.ops.object.bake(
+        type="DIFFUSE",
+        pass_filter={"COLOR"},
+        use_selected_to_active=True,
+        # Generous cage: the decimated surface sags well below the source in
+        # concave areas — a tight cage leaves black ray-miss slashes.
+        cage_extrusion=0.08,
+        max_ray_distance=0.25,
+        margin=24,
+        use_clear=False,  # keep the red fill under everything
+    )
+    img.pack()
+    source.select_set(False)
+
+    tris = sum(len(p.vertices) - 2 for p in lod.data.polygons)
+    print(f"AI seat '{name}': ratio={decimate_ratio} tris={tris} (rebaked {tex_size}px)")
+    return lod
 
 
 def place_seat(template, x, y, z, face_angle):
@@ -364,9 +423,9 @@ def build():
             add_box(f"Down{ix}_{iy}", (0.4, 0.4, 0.06), (ix, y, CEILING - 0.05), downlight)
 
     # --- Seating: curved raked rows with aisles ---
-    if os.path.exists(AI_SEAT_PATH):
-        detailed = load_ai_seat_template("SeatDetailed", AI_SEAT_LOD_NEAR)
-        simple = load_ai_seat_template("SeatSimple", AI_SEAT_LOD_FAR)
+    if os.path.exists(AI_SEAT_NEAR_PATH) and os.path.exists(AI_SEAT_FAR_PATH):
+        detailed = load_ai_seat_template("SeatDetailed", AI_SEAT_NEAR_PATH)
+        simple = load_ai_seat_template("SeatSimple", AI_SEAT_FAR_PATH)
     else:
         detailed = build_seat_template("SeatDetailed", (fabric, frame), detailed=True)
         simple = build_seat_template("SeatSimple", (fabric, frame), detailed=False)
@@ -467,13 +526,16 @@ def export_glb():
     +Y (toward the back of the house) maps to glTF -Z, matching the app's
     'origin at screen wall, extends -Z toward viewer' convention.
     """
-    for name in ("Screen", "SeatDetailed", "SeatSimple"):
-        obj = bpy.data.objects.get(name)
-        if obj:
+    # The app renders this GLB unlit so its textures work reliably — which
+    # also means nothing in it can react to the ambient light sim. So ONLY
+    # the textured seats and the tiers they sit on are exported; every other
+    # surface (walls, baffles, curtains, strips, lights, stage) spawns
+    # procedurally in the app where the tint system and the dimmer own it.
+    keep_prefixes = ("SeatDetailed", "SeatSimple", "Tier")
+    for obj in list(bpy.data.objects):
+        is_template = obj.name in ("SeatDetailed", "SeatSimple")  # parked originals
+        if is_template or not obj.name.startswith(keep_prefixes):
             bpy.data.objects.remove(obj, do_unlink=True)
-    cam = bpy.context.scene.camera
-    if cam:
-        bpy.data.objects.remove(cam, do_unlink=True)
 
     os.makedirs(os.path.dirname(GLB_OUT), exist_ok=True)
     bpy.ops.export_scene.gltf(
